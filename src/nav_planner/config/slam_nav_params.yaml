@@ -1,0 +1,52 @@
+# SLAM 导航规划节点参数配置
+# 改造自 207_ws/nav_planner_params.yaml
+# 核心变更: 去除GPS/RTK参数, 适配室内SLAM环境 (低速、小空间)
+
+slam_nav_node:
+  ros__parameters:
+
+    # ==================== SLAM 定位源配置 ====================
+    slam:
+      odom_topic: "/slam/odom"      # SLAM 里程计话题 (来自 mapping 节点)
+      map_frame: "map"               # 地图坐标系
+      base_frame: "base_link"        # 机器人坐标系
+      use_tf_pose: false             # 是否从 TF 获取位姿 (true=使用tf2, false=使用odom话题)
+
+    # ==================== 规划参数 (室内优化) ====================
+    planning:
+      path_resolution: 0.05          # 路径点间距 (m), 室内空间小需要更密
+      target_speed: 0.5              # 默认目标速度 (m/s), 室内应低速
+      slow_down_dist: 0.5            # 减速区距离 (m)
+      min_speed: 0.05                # 减速区最低速度 (m/s)
+
+    # ==================== 跟踪参数 (室内优化) ====================
+    tracking:
+      lookahead_distance: 0.6        # 前视距离 (m), 室内缩短
+      min_lookahead: 0.2             # 最小前视距离 (m)
+      max_lookahead: 2.0             # 最大前视距离 (m), 室内缩短
+      lookahead_gain: 0.8            # 前视距离速度增益
+      goal_tolerance: 0.15           # 到达判定阈值 (m), SLAM精度略低于RTK
+      heading_tolerance: 0.15        # 航向到达阈值 (rad, ~8.6°)
+      max_linear_x: 1.0              # 最大前进速度 (m/s), 室内限速
+      max_linear_y: 0.8              # 最大横移速度 (m/s)
+      max_angular_velocity: 1.0      # 最大角速度 (rad/s)
+      heading_kp: 1.5                # 航向 P 控制增益
+      cte_kp: 1.0                    # 横向纠偏增益 (Cross-Track Error)
+      cmd_filter_alpha: 0.3          # 指令平滑系数 (0~1)
+      heading_align_threshold: 0.785 # 航向对齐阈值 (rad, ~45°)
+
+    # ==================== 控制频率 ====================
+    control:
+      rate: 20.0                     # 控制循环频率 (Hz)
+
+    # ==================== SDK 接口 ====================
+    sdk:
+      max_vx: 1.0                    # SDK 最大 vx 限幅 (m/s), 室内限速
+      max_vy: 0.8                    # SDK 最大 vy 限幅 (m/s)
+      max_yaw_rate: 1.0              # SDK 最大 yaw_rate 限幅 (rad/s)
+      default_mode: 3                # 默认模式 (3=站立)
+      enable_posture_fields: false   # 是否启用姿态控制字段
+
+    # ==================== 调试 ====================
+    debug:
+      status_rate: 2.0               # 状态发布频率 (Hz)

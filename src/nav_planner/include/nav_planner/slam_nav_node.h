@@ -1,0 +1,163 @@
+// Copyright 2024 nav_planner Authors. All rights reserved.
+// Licensed under the Apache-2.0 License.
+//
+// 改造自 207_ws nav_planner_node.h
+// 核心变更:
+//   1. 定位源从 RTK(rtk/odom + rtk/heading) 改为 SLAM(Faster-LIO2 输出的单一odom)
+//   2. 去除 GPS 坐标系 (ref_lat/lon, GpsToLocal, NavSatFix)
+//   3. 航点使用 map 坐标系本地坐标 (x, y, yaw)
+//   4. 增加 tf2 监听器获取 map→base_link 变换
+//   5. 参数默认值适配室内环境 (低速、小空间)
+
+#ifndef NAV_PLANNER_SLAM_NAV_NODE_H_
+#define NAV_PLANNER_SLAM_NAV_NODE_H_
+
+#include <rclcpp/rclcpp.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/twist.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
+#include <std_msgs/msg/string.hpp>
+#include <std_msgs/msg/bool.hpp>
+#include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/transform_listener.h>
+#include <tf2_ros/buffer.h>
+#include <visualization_msgs/msg/marker.hpp>
+
+#include "nav_planner/common/types.h"
+#include "nav_planner/planning/point_to_point_planner.h"
+#include "nav_planner/tracking/pure_pursuit_tracker.h"
+#include "nav_planner/sdk/robot_sdk_interface.h"
+#include "nav_planner/fsm/navigation_state_machine.h"
+
+#include <mutex>
+#include <optional>
+#include <vector>
+
+namespace slam_nav {
+
+/// SlamNavNode: 室内SLAM导航 ROS2 节点
+///
+/// 职责: 订阅SLAM位姿、规划路径、跟踪控制、底盘指令发布
+/// 定位源: Faster-LIO2 输出的里程计 (nav_msgs/Odometry)
+///        或通过 tf2 监听 map → base_link 变换
+class SlamNavNode : public rclcpp::Node {
+public:
+    explicit SlamNavNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
+    ~SlamNavNode() override = default;
+
+private:
+    // ---- 参数声明与加载 ----
+    void DeclareAndLoadParams();
+
+    // ---- 回调函数 ----
+    /// SLAM 里程计回调 (来自 Faster-LIO2)
+    void SlamOdomCallback(const nav_msgs::msg::Odometry::SharedPtr msg);
+
+    /// RViz2 目标点回调 (map 坐标系)
+    void GoalPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
+
+    /// 本地坐标航点列表回调 (JSON: { "waypoints": [{"x":..,"y":..,"yaw":..},...] })
+    void NavWaypointsCallback(const std_msgs::msg::String::SharedPtr msg);
+
+    /// 取消导航回调
+    void NavCancelCallback(const std_msgs::msg::Bool::SharedPtr msg);
+
+    /// 初始位姿回调 (用于手动校正 SLAM 初始位置)
+    void InitialPoseCallback(
+        const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg);
+
+    // ---- 多航点队列管理 ----
+    void CancelMultiNav();
+
+    // ---- 控制循环 ----
+    void ControlLoop();
+
+    // ---- TF 位姿获取 (备用: 通过 tf2 获取 map→base_link) ----
+    bool GetPoseFromTF(Pose2D& pose);
+
+    // ---- 发布函数 ----
+    void PublishPath();
+    void PublishStatus();
+    void PublishCurrentPose();
+    void PublishTrackingDebug();
+    void PublishControlCmd(const SdkControlMsg& sdk_msg);
+    void PublishStopCmd();
+    void PublishTF();                 // 广播 map → base_link TF (使用 SLAM 数据)
+    void PublishActualTrajectory();   // 累积实际运动轨迹
+    void PublishGoalMarker();         // 发布目标点 Marker
+
+    // ---- 状态机回调 ----
+    void OnStateChange(NavState old_state, NavState new_state);
+
+    // ==================== 四个核心模块 ====================
+    PointToPointPlanner planner_;
+    PurePursuitTracker  tracker_;
+    RobotSdkInterface   sdk_interface_;
+    NavigationStateMachine state_machine_;
+
+    // ==================== ROS2 接口 ====================
+    // 订阅
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr slam_odom_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_sub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr nav_waypoints_sub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr   nav_cancel_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
+        initial_pose_sub_;
+
+    // 发布
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr          path_pub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr        status_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr current_pose_pub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr        tracking_debug_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr    cmd_vel_pub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr        robot_action_pub_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr          robot_enable_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr          actual_trajectory_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr goal_marker_pub_;
+
+    // TF
+    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+    std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+
+    // 定时器
+    rclcpp::TimerBase::SharedPtr control_timer_;
+    rclcpp::TimerBase::SharedPtr status_timer_;
+
+    // ==================== 状态数据 ====================
+    std::mutex data_mutex_;
+
+    // 当前位姿 (来自 SLAM 里程计, map 坐标系)
+    Pose2D current_pose_;
+    bool   slam_odom_received_ = false;
+
+    // SLAM 位姿的 z 坐标 (室内可能有高度信息)
+    double slam_z_ = 0.0;
+
+    // 实际运动轨迹 (累积)
+    nav_msgs::msg::Path actual_trajectory_;
+    double last_traj_x_ = 0.0;
+    double last_traj_y_ = 0.0;
+
+    // 目标位姿
+    std::optional<Pose2D> goal_pose_;
+
+    // 多航点队列
+    std::vector<Pose2D> waypoint_queue_;
+    size_t waypoint_index_ = 0;
+    bool   multi_nav_active_ = false;
+
+    // ==================== 参数 ====================
+    double control_rate_ = 20.0;       // 控制循环频率 (Hz)
+    double status_rate_  = 2.0;        // 状态发布频率 (Hz)
+    bool   use_tf_pose_  = false;      // 是否从 TF 获取位姿 (而非 odom 话题)
+    std::string slam_odom_topic_ = "/slam/odom";   // SLAM 里程计话题名
+    std::string map_frame_  = "map";                // 地图坐标系
+    std::string base_frame_ = "base_link";           // 机器人坐标系
+};
+
+}  // namespace slam_nav
+
+#endif  // NAV_PLANNER_SLAM_NAV_NODE_H_

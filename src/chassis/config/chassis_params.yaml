@@ -1,0 +1,15 @@
+# 底盘 CAN 控制节点参数
+chassis_node:
+  ros__parameters:
+    # CAN 接口名 (通过 ip link 查看, 需提前配置并启用)
+    # sudo ip link set can0 type can bitrate 500000
+    # sudo ip link set can0 up
+    can_interface: "can0"
+
+    # 速度限幅 (对应 /cmd_vel 中 m/s 和 rad/s 的上限)
+    max_vx: 1.0       # 最大前进速度 (m/s)
+    max_vy: 0.8       # 最大横移速度 (m/s)
+    max_vz: 1.0       # 最大角速度   (rad/s)
+
+    # 安全看门狗: /cmd_vel 超过此时间未更新则自动急停
+    watchdog_timeout: 0.5  # 秒

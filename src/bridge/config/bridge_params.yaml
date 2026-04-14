@@ -1,0 +1,11 @@
+# 对外通讯桥接节点参数
+bridge_node:
+  ros__parameters:
+    # TCP 服务器端口 (外部客户端连接此端口)
+    tcp_port: 9090
+
+    # 状态推送频率 (Hz)
+    status_rate: 5.0
+
+    # SLAM 里程计话题 (需与 FAST_LIO 输出一致)
+    slam_odom_topic: "/slam/odom"
