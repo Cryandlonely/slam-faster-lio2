@@ -73,10 +73,10 @@ Visualization Manager:
       Style: Points
       Topic:
         Depth: 1
-        Durability Policy: Volatile
+        Durability Policy: Transient Local
         Filter size: 100
         History Policy: Keep Last
-        Reliability Policy: Best Effort
+        Reliability Policy: Reliable
         Value: /global_map
       Use Fixed Frame: true
       Use rainbow: true

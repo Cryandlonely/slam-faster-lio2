@@ -24,6 +24,7 @@ struct Pose2D {
     double x   = 0.0;   // x轴 (m)
     double y   = 0.0;   // y轴 (m)
     double yaw = 0.0;   // 航向角 (rad), ENU约定: 正东=0, 逆时针为正
+    bool yaw_specified = false;  // 用户是否明确指定了 yaw
 };
 
 /// 路径点 (带航向和速度约束)

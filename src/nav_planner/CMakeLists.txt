@@ -25,6 +25,7 @@ include_directories(include)
 # ---- 核心库 (四模块 + 公共) ----
 add_library(slam_nav_core SHARED
   src/point_to_point_planner.cpp
+  src/astar_planner.cpp
   src/pure_pursuit_tracker.cpp
   src/robot_sdk_interface.cpp
   src/navigation_state_machine.cpp
@@ -35,6 +36,7 @@ target_include_directories(slam_nav_core PUBLIC
 )
 ament_target_dependencies(slam_nav_core
   rclcpp
+  nav_msgs
 )
 
 # ---- 可执行文件 ----

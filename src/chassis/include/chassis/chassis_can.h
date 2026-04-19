@@ -74,6 +74,10 @@ public:
     bool setVelocity(int16_t vx_mm_s, int16_t vy_mm_s, int16_t vz_mrad_s);
     bool stop();
 
+    // 阻塞式接收，等待完整帧，timeout_ms 超时返回 false
+    // 注意: 后台线程运行期间不要同时调用此函数
+    bool receiveFeedback(FeedbackData& data, int timeout_ms = 200);
+
     FeedbackData getLatestFeedback() const;
     void setFeedbackCallback(FeedbackCallback callback);
 

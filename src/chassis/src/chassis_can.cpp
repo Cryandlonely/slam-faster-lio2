@@ -10,7 +10,9 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 
 // ---------------------------------------------------------------------------
@@ -186,7 +188,14 @@ bool ChassisCAN::assembleAndParseFeedback(uint32_t can_id, const uint8_t* data, 
                     latest_feedback_ = parsed;
                     complete         = true;
                 } else {
-                    std::cerr << "[ChassisCAN] BCC 校验失败\n";
+                    std::cerr << "[ChassisCAN] BCC 校验失败: 计算=" 
+                              << std::hex << (int)bcc 
+                              << " 期望=" << (int)fb_buf_[22] << std::dec << "\n";
+                    std::cerr << "[ChassisCAN] 原始数据 (" << 24 << " bytes):";
+                    for (int j = 0; j < 24; ++j) {
+                        std::cerr << " " << std::hex << std::setfill('0') << std::setw(2) << (int)fb_buf_[j];
+                    }
+                    std::cerr << std::dec << "\n";
                 }
             }
             std::fill(fb_received_, fb_received_ + 3, false);
@@ -226,6 +235,50 @@ ChassisCAN::FeedbackData ChassisCAN::parseFeedback(const uint8_t* buf) {
 // ---------------------------------------------------------------------------
 // 反馈接口
 // ---------------------------------------------------------------------------
+
+bool ChassisCAN::receiveFeedback(FeedbackData& data, int timeout_ms) {
+    if (!isOpen()) return false;
+
+    struct pollfd pfd{};
+    pfd.fd     = socket_fd_;
+    pfd.events = POLLIN;
+
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(timeout_ms);
+
+    // 重置拼接状态
+    {
+        std::lock_guard<std::mutex> lk(fb_mutex_);
+        std::fill(fb_received_, fb_received_ + 3, false);
+    }
+
+    while (true) {
+        auto now       = std::chrono::steady_clock::now();
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+        if (remaining.count() <= 0) break;
+
+        int ret = ::poll(&pfd, 1, static_cast<int>(remaining.count()));
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            std::cerr << "[ChassisCAN] poll() 失败: " << std::strerror(errno) << "\n";
+            break;
+        }
+        if (ret == 0) break; // 超时
+
+        if (pfd.revents & POLLIN) {
+            struct can_frame frame{};
+            ssize_t n = ::read(socket_fd_, &frame, sizeof(frame));
+            if (n == static_cast<ssize_t>(sizeof(frame))) {
+                if (assembleAndParseFeedback(frame.can_id, frame.data, frame.can_dlc)) {
+                    std::lock_guard<std::mutex> lk(fb_mutex_);
+                    data = latest_feedback_;
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
 
 ChassisCAN::FeedbackData ChassisCAN::getLatestFeedback() const {
     std::lock_guard<std::mutex> lk(fb_mutex_);

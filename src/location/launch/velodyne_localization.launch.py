@@ -41,6 +41,10 @@ def generate_launch_description():
         'rviz_cfg', default_value=default_rviz_config_path,
         description='RViz config file path'
     )
+    declare_global_search_cmd = DeclareLaunchArgument(
+        'global_search', default_value='true',
+        description='Enable global search localization (set false to start at map origin)'
+    )
 
     # fast_lio_node (예시로 fastlio_mapping 실행)
     fast_lio_node = Node(
@@ -90,9 +94,9 @@ def generate_launch_description():
         output='screen'
     )
 
-    # 延时3秒后自动发布初始位姿 (0,0,0,0,0,0)
+    # 延时5秒后开始循环发布初始位姿, 确保全局地图和点云已就绪
     initial_pose_node = TimerAction(
-        period=3.0,
+        period=5.0,
         actions=[Node(
             package='location',
             executable='publish_initial_pose.py',
@@ -108,6 +112,7 @@ def generate_launch_description():
     ld.add_action(decalre_config_file_cmd)
     ld.add_action(declare_rviz_cmd)
     ld.add_action(declare_rviz_config_path_cmd)
+    ld.add_action(declare_global_search_cmd)
 
     ld.add_action(fast_lio_node)
     ld.add_action(global_localization_node)

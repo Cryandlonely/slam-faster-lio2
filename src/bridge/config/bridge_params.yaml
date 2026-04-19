@@ -8,4 +8,4 @@ bridge_node:
     status_rate: 5.0
 
     # SLAM 里程计话题 (需与 FAST_LIO 输出一致)
-    slam_odom_topic: "/slam/odom"
+    slam_odom_topic: "/Odometry"

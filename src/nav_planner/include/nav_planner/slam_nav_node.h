@@ -23,9 +23,11 @@
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/buffer.h>
+#include <nav_msgs/msg/occupancy_grid.hpp>
 #include <visualization_msgs/msg/marker.hpp>
 
 #include "nav_planner/common/types.h"
+#include "nav_planner/planning/astar_planner.h"
 #include "nav_planner/planning/point_to_point_planner.h"
 #include "nav_planner/tracking/pure_pursuit_tracker.h"
 #include "nav_planner/sdk/robot_sdk_interface.h"
@@ -92,7 +94,8 @@ private:
     void OnStateChange(NavState old_state, NavState new_state);
 
     // ==================== 四个核心模块 ====================
-    PointToPointPlanner planner_;
+    AStarPlanner        astar_planner_;
+    PointToPointPlanner planner_;      // 直线规划 (fallback)
     PurePursuitTracker  tracker_;
     RobotSdkInterface   sdk_interface_;
     NavigationStateMachine state_machine_;
@@ -105,6 +108,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr   nav_cancel_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
         initial_pose_sub_;
+    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
 
     // 发布
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr          path_pub_;
@@ -116,6 +120,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr          robot_enable_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr          actual_trajectory_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr goal_marker_pub_;
+    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_pub_;
 
     // TF
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
@@ -156,6 +161,8 @@ private:
     std::string slam_odom_topic_ = "/slam/odom";   // SLAM 里程计话题名
     std::string map_frame_  = "map";                // 地图坐标系
     std::string base_frame_ = "base_link";           // 机器人坐标系
+    std::string map_topic_  = "map";                   // OccupancyGrid 话题
+    bool use_astar_ = true;                             // 是否使用 A* 避障规划
 };
 
 }  // namespace slam_nav

@@ -29,6 +29,14 @@
   <depend>pcl_conversions</depend>
   <depend>livox_ros_driver2</depend>
 
+  <!-- Python scripts dependencies -->
+  <exec_depend>python3-open3d-pip</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>tf_transformations</exec_depend>
+  <exec_depend>sensor_msgs_py</exec_depend>
+  <exec_depend>tf2_ros_py</exec_depend>
+  <exec_depend>tf2_geometry_msgs</exec_depend>
+
   <exec_depend>rosidl_default_runtime</exec_depend>
   <member_of_group>rosidl_interface_packages</member_of_group>
 

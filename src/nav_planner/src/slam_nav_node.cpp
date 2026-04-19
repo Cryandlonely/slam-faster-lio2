@@ -68,6 +68,22 @@ SlamNavNode::SlamNavNode(const rclcpp::NodeOptions& options)
         "/initialpose", 10,
         std::bind(&SlamNavNode::InitialPoseCallback, this, std::placeholders::_1));
 
+    // OccupancyGrid 地图 (A* 规划用)
+    map_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
+        map_topic_, rclcpp::QoS(1).transient_local().reliable(),
+        [this](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
+            astar_planner_.UpdateMap(msg);
+            RCLCPP_INFO_ONCE(this->get_logger(),
+                "已接收 OccupancyGrid 地图: %dx%d, 分辨率=%.3fm",
+                msg->info.width, msg->info.height, msg->info.resolution);
+            // 发布膨胀后的代价地图用于调试
+            if (costmap_pub_) {
+                auto costmap_msg = astar_planner_.GetInflatedCostmapMsg();
+                costmap_msg.header.stamp = this->now();
+                costmap_pub_->publish(costmap_msg);
+            }
+        });
+
     // ---- 发布 ----
     path_pub_           = this->create_publisher<nav_msgs::msg::Path>("/planned_path", 10);
     status_pub_         = this->create_publisher<std_msgs::msg::String>("/nav_status", 10);
@@ -78,6 +94,8 @@ SlamNavNode::SlamNavNode(const rclcpp::NodeOptions& options)
     robot_enable_pub_   = this->create_publisher<std_msgs::msg::Bool>("/robot_enable", 10);
     actual_trajectory_pub_ = this->create_publisher<nav_msgs::msg::Path>("/actual_trajectory", 10);
     goal_marker_pub_    = this->create_publisher<visualization_msgs::msg::Marker>("/goal_marker", 10);
+    costmap_pub_         = this->create_publisher<nav_msgs::msg::OccupancyGrid>(
+        "/inflated_costmap", rclcpp::QoS(1).transient_local().reliable());
 
     // 初始化实际轨迹消息
     actual_trajectory_.header.frame_id = map_frame_;
@@ -102,10 +120,11 @@ SlamNavNode::SlamNavNode(const rclcpp::NodeOptions& options)
 
     RCLCPP_INFO(this->get_logger(), "SlamNavNode 初始化完成");
     RCLCPP_INFO(this->get_logger(), "  SLAM里程计话题: %s", slam_odom_topic_.c_str());
-    RCLCPP_INFO(this->get_logger(), "  订阅: %s, goal_pose, /nav_waypoints, /nav_cancel, /initialpose",
-                slam_odom_topic_.c_str());
+    RCLCPP_INFO(this->get_logger(), "  订阅: %s, goal_pose, /nav_waypoints, /nav_cancel, /initialpose, %s",
+                slam_odom_topic_.c_str(), map_topic_.c_str());
     RCLCPP_INFO(this->get_logger(), "  发布: /planned_path, /actual_trajectory, /nav_status, "
                 "/current_pose, /tracking_debug, /cmd_vel, /goal_marker");
+    RCLCPP_INFO(this->get_logger(), "  规划器: %s", use_astar_ ? "A* 避障规划" : "直线规划");
     RCLCPP_INFO(this->get_logger(), "  坐标系: %s → %s", map_frame_.c_str(), base_frame_.c_str());
     RCLCPP_INFO(this->get_logger(), "  控制频率: %.1f Hz", control_rate_);
     RCLCPP_INFO(this->get_logger(), "  TF位姿模式: %s", use_tf_pose_ ? "开启" : "关闭");
@@ -124,6 +143,12 @@ void SlamNavNode::DeclareAndLoadParams() {
     base_frame_ = this->get_parameter("slam.base_frame").as_string();
     use_tf_pose_ = this->get_parameter("slam.use_tf_pose").as_bool();
 
+    // -- 地图配置 --
+    this->declare_parameter<std::string>("planning.map_topic", "map");
+    this->declare_parameter<bool>("planning.use_astar", true);
+    map_topic_  = this->get_parameter("planning.map_topic").as_string();
+    use_astar_  = this->get_parameter("planning.use_astar").as_bool();
+
     // -- 控制频率 --
     this->declare_parameter<double>("control.rate", 20.0);
     this->declare_parameter<double>("debug.status_rate", 2.0);
@@ -141,6 +166,18 @@ void SlamNavNode::DeclareAndLoadParams() {
     pp.slow_down_dist  = this->get_parameter("planning.slow_down_dist").as_double();
     pp.min_speed       = this->get_parameter("planning.min_speed").as_double();
     planner_.SetParams(pp);
+
+    // -- A* 规划参数 --
+    AStarParams ap;
+    ap.path_resolution   = pp.path_resolution;
+    ap.target_speed      = pp.target_speed;
+    ap.slow_down_dist    = pp.slow_down_dist;
+    ap.min_speed         = pp.min_speed;
+    this->declare_parameter<int>("planning.obstacle_inflate", ap.obstacle_inflate);
+    this->declare_parameter<int>("planning.occupied_thresh", ap.occupied_thresh);
+    ap.obstacle_inflate  = this->get_parameter("planning.obstacle_inflate").as_int();
+    ap.occupied_thresh   = this->get_parameter("planning.occupied_thresh").as_int();
+    astar_planner_.SetParams(ap);
 
     // -- 跟踪参数 (室内默认值) --
     TrackerParams tp;
@@ -222,22 +259,12 @@ void SlamNavNode::GoalPoseCallback(
     goal.x = msg->pose.position.x;
     goal.y = msg->pose.position.y;
 
-    // 到点朝向: 优先使用当前位置→目标方向
-    if (slam_odom_received_) {
-        double dist = Distance(current_pose_.x, current_pose_.y, goal.x, goal.y);
-        if (dist > 0.1) {
-            goal.yaw = Azimuth(current_pose_.x, current_pose_.y, goal.x, goal.y);
-        } else {
-            // 距离太近时保持当前朝向
-            goal.yaw = current_pose_.yaw;
-        }
-    } else {
-        goal.yaw = QuaternionToYaw(
-            msg->pose.orientation.w,
-            msg->pose.orientation.x,
-            msg->pose.orientation.y,
-            msg->pose.orientation.z);
-    }
+    // 到点朝向: 使用消息中四元数指定的朝向
+    goal.yaw = QuaternionToYaw(
+        msg->pose.orientation.w,
+        msg->pose.orientation.x,
+        msg->pose.orientation.y,
+        msg->pose.orientation.z);
 
     goal_pose_ = goal;
 
@@ -325,6 +352,7 @@ void SlamNavNode::NavWaypointsCallback(
             pose.x = wp["x"].get<double>();
             pose.y = wp["y"].get<double>();
             pose.yaw = wp.value("yaw", 0.0);
+            pose.yaw_specified = wp.contains("yaw");  // 标记用户是否指定了 yaw
             waypoint_queue_.push_back(pose);
         }
 
@@ -334,8 +362,12 @@ void SlamNavNode::NavWaypointsCallback(
             return;
         }
 
-        // 对每个航点计算出发朝向
+        // 对未指定 yaw 的中间航点, 自动计算行驶方向作为朝向
+        // 用户明确指定了 yaw 的航点保持不变
         for (size_t i = 0; i < waypoint_queue_.size(); ++i) {
+            if (waypoint_queue_[i].yaw_specified) {
+                continue;  // 用户指定了 yaw, 不覆盖
+            }
             if (i + 1 < waypoint_queue_.size()) {
                 waypoint_queue_[i].yaw = Azimuth(
                     waypoint_queue_[i].x, waypoint_queue_[i].y,
@@ -344,14 +376,12 @@ void SlamNavNode::NavWaypointsCallback(
                 waypoint_queue_[i].yaw = Azimuth(
                     waypoint_queue_[i-1].x, waypoint_queue_[i-1].y,
                     waypoint_queue_[i].x, waypoint_queue_[i].y);
+            } else if (slam_odom_received_) {
+                // 单航点且未指定 yaw: 使用行驶方向
+                waypoint_queue_[i].yaw = Azimuth(
+                    current_pose_.x, current_pose_.y,
+                    waypoint_queue_[i].x, waypoint_queue_[i].y);
             }
-        }
-
-        // 单点任务: 朝向 = 当前位置→目标方向
-        if (waypoint_queue_.size() == 1 && slam_odom_received_) {
-            waypoint_queue_[0].yaw = Azimuth(
-                current_pose_.x, current_pose_.y,
-                waypoint_queue_[0].x, waypoint_queue_[0].y);
         }
 
         multi_nav_active_ = true;
@@ -427,24 +457,37 @@ void SlamNavNode::ControlLoop() {
             }
 
             bool ok = false;
-            if (multi_nav_active_ && waypoint_queue_.size() > 1) {
-                ok = planner_.PlanMulti(current_pose_, waypoint_queue_);
-            } else {
-                ok = planner_.Plan(current_pose_, goal_pose_.value(), true);
+            if (use_astar_ && astar_planner_.HasMap()) {
+                // A* 避障规划
+                if (multi_nav_active_ && waypoint_queue_.size() > 1) {
+                    ok = astar_planner_.PlanMulti(current_pose_, waypoint_queue_);
+                } else {
+                    ok = astar_planner_.Plan(current_pose_, goal_pose_.value(), true);
+                }
+
+                if (ok && astar_planner_.HasValidPath()) {
+                    tracker_.SetPath(astar_planner_.GetPath(), true);
+                    state_machine_.HandleEvent(NavEvent::PLAN_SUCCESS);
+                    // 同步路径到 planner_ 用于发布
+                    planner_.ClearPath();
+                    PublishPath();
+                    actual_trajectory_.poses.clear();
+                    last_traj_x_ = current_pose_.x;
+                    last_traj_y_ = current_pose_.y;
+                    RCLCPP_INFO(this->get_logger(), "A* 路径规划成功, %zu 个路径点",
+                                astar_planner_.GetPath().size());
+                } else {
+                    RCLCPP_WARN(this->get_logger(), "A* 规划失败, 回退到直线规划");
+                    // 回退到直线规划
+                    ok = false;
+                }
             }
 
-            if (ok && planner_.HasValidPath()) {
-                tracker_.SetPath(planner_.GetPath(), true);
-                state_machine_.HandleEvent(NavEvent::PLAN_SUCCESS);
-                PublishPath();
-                actual_trajectory_.poses.clear();
-                last_traj_x_ = current_pose_.x;
-                last_traj_y_ = current_pose_.y;
-                RCLCPP_INFO(this->get_logger(), "路径规划成功, %zu 个路径点",
-                            planner_.GetPath().size());
-            } else {
+            if (!ok) {
+                // A* 规划失败, 室内环境禁止直线规划(会撞墙)
                 state_machine_.HandleEvent(NavEvent::PLAN_FAILED);
-                RCLCPP_ERROR(this->get_logger(), "路径规划失败");
+                RCLCPP_ERROR(this->get_logger(),
+                    "A* 路径规划失败 (目标可能不可达), 已取消导航");
             }
             break;
         }
@@ -488,13 +531,20 @@ void SlamNavNode::ControlLoop() {
 // ==================== 发布函数 ====================
 
 void SlamNavNode::PublishPath() {
-    if (!planner_.HasValidPath()) return;
+    // 优先使用 A* 路径
+    const std::vector<Waypoint>* path_ptr = nullptr;
+    if (use_astar_ && astar_planner_.HasValidPath()) {
+        path_ptr = &astar_planner_.GetPath();
+    } else if (planner_.HasValidPath()) {
+        path_ptr = &planner_.GetPath();
+    }
+    if (!path_ptr) return;
 
     auto path_msg = nav_msgs::msg::Path();
     path_msg.header.stamp = this->now();
     path_msg.header.frame_id = map_frame_;
 
-    for (const auto& wp : planner_.GetPath()) {
+    for (const auto& wp : *path_ptr) {
         geometry_msgs::msg::PoseStamped ps;
         ps.header = path_msg.header;
         ps.pose.position.x = wp.x;
@@ -696,6 +746,7 @@ void SlamNavNode::OnStateChange(NavState old_state, NavState new_state) {
         if (new_state == NavState::REACHED) {
             tracker_.Reset();
             planner_.ClearPath();
+            astar_planner_.ClearPath();
             multi_nav_active_ = false;
         }
 

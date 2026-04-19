@@ -7,17 +7,21 @@ slam_nav_node:
 
     # ==================== SLAM 定位源配置 ====================
     slam:
-      odom_topic: "/slam/odom"      # SLAM 里程计话题 (来自 mapping 节点)
+      odom_topic: "/Odometry"        # 建图模式用 /Odometry; 定位模式可改为 /localization
       map_frame: "map"               # 地图坐标系
       base_frame: "base_link"        # 机器人坐标系
-      use_tf_pose: false             # 是否从 TF 获取位姿 (true=使用tf2, false=使用odom话题)
+      use_tf_pose: true              # 从 TF 获取底盘位姿 (map→base_link, 含雷达安装偏移补偿)
 
     # ==================== 规划参数 (室内优化) ====================
     planning:
+      use_astar: true                # 是否使用 A* 避障规划 (false=直线规划)
+      map_topic: "map"               # OccupancyGrid 地图话题 (pcd2pgm 发布)
       path_resolution: 0.05          # 路径点间距 (m), 室内空间小需要更密
       target_speed: 0.5              # 默认目标速度 (m/s), 室内应低速
       slow_down_dist: 0.5            # 减速区距离 (m)
       min_speed: 0.05                # 减速区最低速度 (m/s)
+      obstacle_inflate: 7            # 障碍物膨胀格数 (安全距离=格数×0.05m=0.35m, 半车宽)
+      occupied_thresh: 65            # 栅格占用阈值 (0-100, >=此值视为障碍)
 
     # ==================== 跟踪参数 (室内优化) ====================
     tracking:
@@ -27,8 +31,8 @@ slam_nav_node:
       lookahead_gain: 0.8            # 前视距离速度增益
       goal_tolerance: 0.15           # 到达判定阈值 (m), SLAM精度略低于RTK
       heading_tolerance: 0.15        # 航向到达阈值 (rad, ~8.6°)
-      max_linear_x: 1.0              # 最大前进速度 (m/s), 室内限速
-      max_linear_y: 0.8              # 最大横移速度 (m/s)
+      max_linear_x: 0.5              # 最大前进速度 (m/s), 室内限速
+      max_linear_y: 0.5              # 最大横移速度 (m/s)
       max_angular_velocity: 1.0      # 最大角速度 (rad/s)
       heading_kp: 1.5                # 航向 P 控制增益
       cte_kp: 1.0                    # 横向纠偏增益 (Cross-Track Error)
@@ -41,8 +45,8 @@ slam_nav_node:
 
     # ==================== SDK 接口 ====================
     sdk:
-      max_vx: 1.0                    # SDK 最大 vx 限幅 (m/s), 室内限速
-      max_vy: 0.8                    # SDK 最大 vy 限幅 (m/s)
+      max_vx: 0.5                    # SDK 最大 vx 限幅 (m/s), 室内限速
+      max_vy: 0.5                    # SDK 最大 vy 限幅 (m/s)
       max_yaw_rate: 1.0              # SDK 最大 yaw_rate 限幅 (rad/s)
       default_mode: 3                # 默认模式 (3=站立)
       enable_posture_fields: false   # 是否启用姿态控制字段
