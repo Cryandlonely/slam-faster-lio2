@@ -4,8 +4,17 @@ bridge_node:
     # TCP 服务器端口 (外部客户端连接此端口)
     tcp_port: 9090
 
+    # PCD 传输专用端口 (与控制端口分离)
+    pcd_tcp_port: 9091
+
     # 状态推送频率 (Hz)
     status_rate: 5.0
 
     # SLAM 里程计话题 (需与 FAST_LIO 输出一致)
     slam_odom_topic: "/Odometry"
+
+    # 实时点云文件相对路径 (相对于 bridge 启动目录)
+    trans_pcd_rel_path: "src/location/PCD/transPCD/trans.pcd"
+
+    # PCD 分片传输单包最大字节数
+    trans_chunk_bytes: 65536

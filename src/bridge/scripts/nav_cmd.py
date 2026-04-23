@@ -7,6 +7,7 @@
   2 - 多点导航 (逐个输入航点)
   3 - 停止导航
   4 - 查询状态
+    6 - 下载实时点云文件 (trans.pcd)
   q - 退出
 
 用法:
@@ -15,6 +16,7 @@
 """
 
 import argparse
+import base64
 import json
 import socket
 import sys
@@ -24,6 +26,7 @@ import threading
 
 HOST = "localhost"
 PORT = 9090
+PCD_PORT = 9091
 
 
 def tcp_send(data: dict, timeout: float = 3.0) -> str:
@@ -31,6 +34,26 @@ def tcp_send(data: dict, timeout: float = 3.0) -> str:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(timeout)
         s.connect((HOST, PORT))
+        s.sendall(msg.encode("utf-8"))
+        buf = b""
+        try:
+            while True:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                if b"\n" in buf:
+                    break
+        except socket.timeout:
+            pass
+    return buf.decode("utf-8", errors="replace").strip()
+
+
+def pcd_send(data: dict, timeout: float = 5.0) -> str:
+    msg = json.dumps(data, ensure_ascii=False) + "\n"
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        s.connect((HOST, PCD_PORT))
         s.sendall(msg.encode("utf-8"))
         buf = b""
         try:
@@ -195,6 +218,79 @@ def do_status():
         print(f"  ✗ 连接失败: {e}")
 
 
+def do_download_trans_pcd():
+    print("  → 查询 trans.pcd 文件信息")
+    try:
+        info_resp = pcd_send({"cmd": "pcd_info"}, timeout=3.0)
+        info = json.loads(info_resp)
+    except (ConnectionRefusedError, socket.timeout) as e:
+        print(f"  ✗ PCD 端口连接失败: {e}")
+        return
+    except json.JSONDecodeError:
+        print(f"  ✗ PCD 信息返回非法 JSON: {info_resp}")
+        return
+
+    if not info.get("exists", False):
+        print("  ✗ trans.pcd 不存在，请先启动建图并开启实时保存")
+        return
+
+    total_size = int(info.get("size", 0))
+    chunk_bytes = int(info.get("chunk_bytes", 65536))
+    if total_size <= 0:
+        print("  ✗ trans.pcd 文件大小为 0")
+        return
+
+    default_out = "trans_download.pcd"
+    out_path = input(f"保存路径 (回车默认 {default_out}): ").strip()
+    if not out_path:
+        out_path = default_out
+
+    print(f"  → 开始下载: {total_size} bytes, chunk={chunk_bytes} bytes")
+
+    offset = 0
+    with open(out_path, "wb") as f:
+        while offset < total_size:
+            req_len = min(chunk_bytes, total_size - offset)
+            try:
+                chunk_resp = pcd_send(
+                    {"cmd": "pcd_chunk", "offset": offset, "length": req_len},
+                    timeout=8.0,
+                )
+                chunk = json.loads(chunk_resp)
+            except (ConnectionRefusedError, socket.timeout) as e:
+                print(f"\n  ✗ 下载中断，连接失败: {e}")
+                return
+            except json.JSONDecodeError:
+                print(f"\n  ✗ 下载中断，返回非法 JSON: {chunk_resp}")
+                return
+
+            if "error" in chunk:
+                print(f"\n  ✗ 下载失败: {chunk['error']}")
+                return
+
+            data_b64 = chunk.get("data_b64", "")
+            try:
+                data = base64.b64decode(data_b64)
+            except Exception as e:
+                print(f"\n  ✗ Base64 解码失败: {e}")
+                return
+
+            got = len(data)
+            if got == 0 and not chunk.get("eof", False):
+                print("\n  ✗ 下载失败: 收到空分片")
+                return
+
+            f.write(data)
+            offset += got
+            progress = min(100.0, 100.0 * offset / total_size)
+            print(f"\r  下载进度: {progress:6.2f}% ({offset}/{total_size})", end="", flush=True)
+
+            if chunk.get("eof", False):
+                break
+
+    print(f"\n  ★ 下载完成: {out_path}")
+
+
 MENU = """
 ========== 导航控制 ==========
   1 - 单点导航
@@ -202,22 +298,25 @@ MENU = """
   3 - 停止导航
   4 - 实时位置
   5 - 查询状态
+    6 - 下载实时点云文件 (trans.pcd)
   q - 退出
 =============================="""
 
 
 def main():
-    global HOST, PORT
+    global HOST, PORT, PCD_PORT
 
     parser = argparse.ArgumentParser(description="导航控制交互脚本")
     parser.add_argument("--host", default="localhost", help="BridgeNode IP (默认 localhost)")
     parser.add_argument("--port", type=int, default=9090, help="BridgeNode 端口 (默认 9090)")
+    parser.add_argument("--pcd-port", type=int, default=9091, help="PCD 传输端口 (默认 9091)")
     args = parser.parse_args()
 
     HOST = args.host
     PORT = args.port
+    PCD_PORT = args.pcd_port
 
-    print(f"连接目标: {HOST}:{PORT}")
+    print(f"连接目标: 控制 {HOST}:{PORT}, PCD {HOST}:{PCD_PORT}")
 
     while True:
         print(MENU)
@@ -233,11 +332,13 @@ def main():
             do_realtime_pose()
         elif choice == "5":
             do_status()
+        elif choice == "6":
+            do_download_trans_pcd()
         elif choice in ("q", "Q", "quit", "exit"):
             print("退出")
             break
         else:
-            print("无效输入，请输入 1-5 或 q")
+            print("无效输入，请输入 1-6 或 q")
 
 
 if __name__ == "__main__":

@@ -40,6 +40,8 @@
 #include <csignal>
 #include <chrono>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <Python.h>
 #include <so3_math.h>
 #include <rclcpp/rclcpp.hpp>
@@ -87,6 +89,7 @@ condition_variable sig_buffer;
 
 string root_dir = ROOT_DIR;
 string map_file_path, lid_topic, imu_topic;
+string realtime_trans_rel_path = "PCD/transPCD/trans.pcd";
 
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
@@ -95,6 +98,9 @@ double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
+double realtime_trans_save_interval_sec = 1.0;
+double realtime_trans_voxel_size = 0.2;  // 降采样叶子尺寸(m), <=0 不降采样
+bool   realtime_trans_save_en = false;
 bool   point_selected_surf[100000] = {0};
 bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
 bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
@@ -487,6 +493,39 @@ void map_incremental()
 
 PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI());
 PointCloudXYZI::Ptr pcl_wait_save(new PointCloudXYZI());
+
+static void EnsureRelativeParentDirs(const string &base_dir, const string &rel_file_path)
+{
+    size_t slash_pos = rel_file_path.find_last_of('/');
+    if (slash_pos == string::npos) {
+        return;
+    }
+
+    string rel_parent = rel_file_path.substr(0, slash_pos);
+    if (rel_parent.empty()) {
+        return;
+    }
+
+    string current = base_dir;
+    if (!current.empty() && current.back() != '/') {
+        current += "/";
+    }
+
+    size_t start = 0;
+    while (start < rel_parent.size()) {
+        size_t end = rel_parent.find('/', start);
+        string part = (end == string::npos) ? rel_parent.substr(start) : rel_parent.substr(start, end - start);
+        if (!part.empty()) {
+            current += part;
+            mkdir(current.c_str(), 0755);
+            current += "/";
+        }
+        if (end == string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+}
 void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull)
 {
     if(scan_pub_en)
@@ -538,6 +577,35 @@ void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Share
             pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
             pcl_wait_save->clear();
             scan_wait_num = 0;
+        }
+
+        // 实时导出当前地图点云(固定文件名覆盖), 便于遥控端读取
+        if (pcl_wait_save->size() > 0 && realtime_trans_save_en && realtime_trans_save_interval_sec > 0.0)
+        {
+            static double last_trans_save_time = -1.0;
+            if (last_trans_save_time < 0.0 ||
+                (lidar_end_time - last_trans_save_time) >= realtime_trans_save_interval_sec)
+            {
+                EnsureRelativeParentDirs(string(ROOT_DIR), realtime_trans_rel_path);
+                string trans_points_dir = string(ROOT_DIR) + realtime_trans_rel_path;
+                string trans_points_tmp  = trans_points_dir + ".tmp";
+                pcl::PCDWriter pcd_writer;
+                // 先体素降采样再写临时文件, 最后原子rename避免竞态
+                if (realtime_trans_voxel_size > 0.0) {
+                    PointCloudXYZI::Ptr cloud_ds(new PointCloudXYZI());
+                    pcl::VoxelGrid<PointType> vg;
+                    vg.setInputCloud(pcl_wait_save);
+                    vg.setLeafSize(realtime_trans_voxel_size,
+                                   realtime_trans_voxel_size,
+                                   realtime_trans_voxel_size);
+                    vg.filter(*cloud_ds);
+                    pcd_writer.writeBinary(trans_points_tmp, *cloud_ds);
+                } else {
+                    pcd_writer.writeBinary(trans_points_tmp, *pcl_wait_save);
+                }
+                rename(trans_points_tmp.c_str(), trans_points_dir.c_str());
+                last_trans_save_time = lidar_end_time;
+            }
         }
     }
 }
@@ -830,6 +898,10 @@ public:
         this->declare_parameter<bool>("mapping.extrinsic_est_en", true);
         this->declare_parameter<bool>("pcd_save.pcd_save_en", false);
         this->declare_parameter<int>("pcd_save.interval", -1);
+        this->declare_parameter<bool>("pcd_save.realtime_trans_save_en", false);
+        this->declare_parameter<double>("pcd_save.realtime_trans_interval_sec", 1.0);
+        this->declare_parameter<string>("pcd_save.realtime_trans_rel_path", "PCD/transPCD/trans.pcd");
+        this->declare_parameter<double>("pcd_save.realtime_trans_voxel_size", 0.2);
         this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
         this->declare_parameter<vector<double>>("mapping.extrinsic_R", vector<double>());
 
@@ -866,6 +938,10 @@ public:
         this->get_parameter_or<bool>("mapping.extrinsic_est_en", extrinsic_est_en, true);
         this->get_parameter_or<bool>("pcd_save.pcd_save_en", pcd_save_en, false);
         this->get_parameter_or<int>("pcd_save.interval", pcd_save_interval, -1);
+        this->get_parameter_or<bool>("pcd_save.realtime_trans_save_en", realtime_trans_save_en, false);
+        this->get_parameter_or<double>("pcd_save.realtime_trans_interval_sec", realtime_trans_save_interval_sec, 1.0);
+        this->get_parameter_or<string>("pcd_save.realtime_trans_rel_path", realtime_trans_rel_path, string("PCD/transPCD/trans.pcd"));
+        this->get_parameter_or<double>("pcd_save.realtime_trans_voxel_size", realtime_trans_voxel_size, 0.2);
         this->get_parameter_or<vector<double>>("mapping.extrinsic_T", extrinT, vector<double>());
         this->get_parameter_or<vector<double>>("mapping.extrinsic_R", extrinR, vector<double>());
 

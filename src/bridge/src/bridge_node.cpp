@@ -1,7 +1,10 @@
 #include "bridge/bridge_node.h"
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <nlohmann/json.hpp>
+#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -12,6 +15,43 @@ static double quat_to_yaw(double w, double x, double y, double z) {
     double siny_cosp = 2.0 * (w * z + x * y);
     double cosy_cosp = 1.0 - 2.0 * (y * y + z * z);
     return std::atan2(siny_cosp, cosy_cosp);
+}
+
+static std::string base64_encode(const std::vector<uint8_t>& data) {
+    static const char* table =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((data.size() + 2) / 3) * 4);
+
+    size_t i = 0;
+    while (i + 2 < data.size()) {
+        uint32_t n = (static_cast<uint32_t>(data[i]) << 16) |
+                     (static_cast<uint32_t>(data[i + 1]) << 8) |
+                     static_cast<uint32_t>(data[i + 2]);
+        out.push_back(table[(n >> 18) & 0x3F]);
+        out.push_back(table[(n >> 12) & 0x3F]);
+        out.push_back(table[(n >> 6) & 0x3F]);
+        out.push_back(table[n & 0x3F]);
+        i += 3;
+    }
+
+    size_t rem = data.size() - i;
+    if (rem == 1) {
+        uint32_t n = (static_cast<uint32_t>(data[i]) << 16);
+        out.push_back(table[(n >> 18) & 0x3F]);
+        out.push_back(table[(n >> 12) & 0x3F]);
+        out.push_back('=');
+        out.push_back('=');
+    } else if (rem == 2) {
+        uint32_t n = (static_cast<uint32_t>(data[i]) << 16) |
+                     (static_cast<uint32_t>(data[i + 1]) << 8);
+        out.push_back(table[(n >> 18) & 0x3F]);
+        out.push_back(table[(n >> 12) & 0x3F]);
+        out.push_back(table[(n >> 6) & 0x3F]);
+        out.push_back('=');
+    }
+
+    return out;
 }
 
 BridgeNode::BridgeNode(const rclcpp::NodeOptions& options)
@@ -33,6 +73,18 @@ BridgeNode::BridgeNode(const rclcpp::NodeOptions& options)
         throw std::runtime_error("TCP 服务器启动失败");
     }
     RCLCPP_INFO(this->get_logger(), "TCP 服务器已启动, 端口: %d", tcp_port_);
+
+    // ---- PCD 传输专用 TCP 服务器 ----
+    pcd_server_ = std::make_unique<TcpServer>(pcd_tcp_port_);
+    pcd_server_->setMessageCallback(
+        [this](int fd, const std::string& msg) { OnPcdTcpMessage(fd, msg); });
+    pcd_server_->setConnectCallback(
+        [this](int fd, bool connected) { OnPcdTcpConnect(fd, connected); });
+    if (!pcd_server_->start()) {
+        RCLCPP_ERROR(this->get_logger(), "PCD 传输服务器启动失败 (port=%d)", pcd_tcp_port_);
+        throw std::runtime_error("PCD 传输服务器启动失败");
+    }
+    RCLCPP_INFO(this->get_logger(), "PCD 传输服务器已启动, 端口: %d", pcd_tcp_port_);
 
     // ---- ROS2 订阅 (聚合状态源) ----
     nav_status_sub_ = this->create_subscription<std_msgs::msg::String>(
@@ -63,13 +115,17 @@ BridgeNode::BridgeNode(const rclcpp::NodeOptions& options)
         std::bind(&BridgeNode::StatusBroadcastCallback, this));
 
     RCLCPP_INFO(this->get_logger(), "BridgeNode 初始化完成");
-    RCLCPP_INFO(this->get_logger(), "  TCP 端口: %d, 状态推送: %.0f Hz", tcp_port_, status_rate_);
+    RCLCPP_INFO(this->get_logger(), "  控制端口: %d, PCD端口: %d, 状态推送: %.0f Hz",
+                tcp_port_, pcd_tcp_port_, status_rate_);
     RCLCPP_INFO(this->get_logger(), "  订阅: /nav_status, %s, /chassis/feedback, /chassis/battery",
                 slam_odom_topic_.c_str());
     RCLCPP_INFO(this->get_logger(), "  发布: goal_pose, /nav_waypoints, /nav_cancel");
 }
 
 BridgeNode::~BridgeNode() {
+    if (pcd_server_) {
+        pcd_server_->stop();
+    }
     if (tcp_server_) {
         tcp_server_->stop();
     }
@@ -77,12 +133,21 @@ BridgeNode::~BridgeNode() {
 
 void BridgeNode::DeclareAndLoadParams() {
     this->declare_parameter<int>("tcp_port", 9090);
+    this->declare_parameter<int>("pcd_tcp_port", 9091);
     this->declare_parameter<double>("status_rate", 5.0);
     this->declare_parameter<std::string>("slam_odom_topic", "/slam/odom");
+    this->declare_parameter<std::string>("trans_pcd_rel_path", "src/location/PCD/transPCD/trans.pcd");
+    this->declare_parameter<int>("trans_chunk_bytes", 65536);
 
     tcp_port_        = static_cast<uint16_t>(this->get_parameter("tcp_port").as_int());
+    pcd_tcp_port_    = static_cast<uint16_t>(this->get_parameter("pcd_tcp_port").as_int());
     status_rate_     = this->get_parameter("status_rate").as_double();
     slam_odom_topic_ = this->get_parameter("slam_odom_topic").as_string();
+    trans_pcd_rel_path_ = this->get_parameter("trans_pcd_rel_path").as_string();
+    trans_chunk_bytes_ = this->get_parameter("trans_chunk_bytes").as_int();
+    if (trans_chunk_bytes_ <= 0) {
+        trans_chunk_bytes_ = 65536;
+    }
 }
 
 // ==================== TCP 消息处理 ====================
@@ -165,6 +230,109 @@ void BridgeNode::OnTcpConnect(int client_fd, bool connected) {
                     client_fd, tcp_server_->clientCount());
     } else {
         RCLCPP_INFO(this->get_logger(), "[TCP] 客户端断开 fd=%d", client_fd);
+    }
+}
+
+void BridgeNode::OnPcdTcpConnect(int client_fd, bool connected) {
+    if (connected) {
+        RCLCPP_INFO(this->get_logger(), "[PCD TCP] 客户端连接 fd=%d (共 %zu)",
+                    client_fd, pcd_server_->clientCount());
+    } else {
+        RCLCPP_INFO(this->get_logger(), "[PCD TCP] 客户端断开 fd=%d", client_fd);
+    }
+}
+
+std::string BridgeNode::ResolveTransPcdPath() const {
+    std::filesystem::path p(trans_pcd_rel_path_);
+    if (p.is_absolute()) {
+        return p.string();
+    }
+    return (std::filesystem::current_path() / p).string();
+}
+
+void BridgeNode::OnPcdTcpMessage(int client_fd, const std::string& msg) {
+    try {
+        auto j = nlohmann::json::parse(msg);
+        if (!j.contains("cmd") || !j["cmd"].is_string()) {
+            pcd_server_->sendTo(client_fd, R"({"error":"missing 'cmd' field"})");
+            return;
+        }
+
+        const std::string cmd = j["cmd"].get<std::string>();
+        const std::string file_path = ResolveTransPcdPath();
+
+        if (cmd == "pcd_info") {
+            nlohmann::json out;
+            out["type"] = "pcd_info";
+            out["path"] = file_path;
+            out["chunk_bytes"] = trans_chunk_bytes_;
+            if (!std::filesystem::exists(file_path)) {
+                out["exists"] = false;
+                out["size"] = 0;
+                out["mtime_ns"] = 0;
+            } else {
+                out["exists"] = true;
+                out["size"] = static_cast<uint64_t>(std::filesystem::file_size(file_path));
+                auto mtime = std::filesystem::last_write_time(file_path).time_since_epoch().count();
+                out["mtime_ns"] = static_cast<int64_t>(mtime);
+            }
+            pcd_server_->sendTo(client_fd, out.dump());
+            return;
+        }
+
+        if (cmd == "pcd_chunk") {
+            if (!std::filesystem::exists(file_path)) {
+                pcd_server_->sendTo(client_fd, R"({"error":"pcd_not_found"})");
+                return;
+            }
+
+            uint64_t offset = j.value("offset", 0ULL);
+            uint64_t req_len = static_cast<uint64_t>(j.value("length", trans_chunk_bytes_));
+            if (req_len == 0 || req_len > static_cast<uint64_t>(trans_chunk_bytes_)) {
+                req_len = static_cast<uint64_t>(trans_chunk_bytes_);
+            }
+
+            const uint64_t total_size = static_cast<uint64_t>(std::filesystem::file_size(file_path));
+            if (offset >= total_size) {
+                nlohmann::json out;
+                out["type"] = "pcd_chunk";
+                out["offset"] = offset;
+                out["length"] = 0;
+                out["eof"] = true;
+                out["data_b64"] = "";
+                out["total_size"] = total_size;
+                pcd_server_->sendTo(client_fd, out.dump());
+                return;
+            }
+
+            uint64_t read_len = std::min(req_len, total_size - offset);
+            std::ifstream ifs(file_path, std::ios::binary);
+            if (!ifs.is_open()) {
+                pcd_server_->sendTo(client_fd, R"({"error":"pcd_open_failed"})");
+                return;
+            }
+            ifs.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+            std::vector<uint8_t> buf(static_cast<size_t>(read_len));
+            ifs.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(read_len));
+            size_t got = static_cast<size_t>(ifs.gcount());
+            buf.resize(got);
+
+            nlohmann::json out;
+            out["type"] = "pcd_chunk";
+            out["offset"] = offset;
+            out["length"] = static_cast<uint64_t>(got);
+            out["eof"] = (offset + got >= total_size);
+            out["total_size"] = total_size;
+            out["data_b64"] = base64_encode(buf);
+            pcd_server_->sendTo(client_fd, out.dump());
+            return;
+        }
+
+        pcd_server_->sendTo(client_fd,
+            R"({"error":"unknown cmd","supported":["pcd_info","pcd_chunk"]})");
+    } catch (const nlohmann::json::exception& e) {
+        pcd_server_->sendTo(client_fd,
+            std::string(R"({"error":"json_parse_error","detail":")") + e.what() + "\"}");
     }
 }
 

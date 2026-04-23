@@ -12,6 +12,7 @@
 
 #include <memory>
 #include <mutex>
+#include <string>
 
 namespace bridge {
 
@@ -41,6 +42,8 @@ private:
     // TCP 消息处理
     void OnTcpMessage(int client_fd, const std::string& msg);
     void OnTcpConnect(int client_fd, bool connected);
+    void OnPcdTcpMessage(int client_fd, const std::string& msg);
+    void OnPcdTcpConnect(int client_fd, bool connected);
 
     // ROS2 回调: 聚合系统状态
     void NavStatusCallback(const std_msgs::msg::String::SharedPtr msg);
@@ -53,9 +56,11 @@ private:
 
     // 构造聚合状态 JSON
     std::string BuildStatusJson();
+    std::string ResolveTransPcdPath() const;
 
     // TCP 服务器
     std::unique_ptr<TcpServer> tcp_server_;
+    std::unique_ptr<TcpServer> pcd_server_;
 
     // ---- ROS2 订阅 (聚合状态源) ----
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr nav_status_sub_;
@@ -73,8 +78,11 @@ private:
 
     // ---- 参数 ----
     uint16_t tcp_port_       = 9090;
+    uint16_t pcd_tcp_port_   = 9091;
     double   status_rate_    = 5.0;    // Hz
     std::string slam_odom_topic_ = "/slam/odom";
+    std::string trans_pcd_rel_path_ = "src/location/PCD/transPCD/trans.pcd";
+    int trans_chunk_bytes_ = 65536;
 
     // ---- 缓存的状态数据 ----
     std::mutex status_mutex_;
