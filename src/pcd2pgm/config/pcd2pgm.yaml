@@ -24,3 +24,8 @@ pcd2pgm:
     thres_point_count: 7
     sor_mean_k: 50                # 统计滤波: 计算均值的邻居数 (越大越严格, 越慢)
     sor_stddev_thresh: 1.0        # 统计滤波: 标准差倍数阈值 (越小越严格, 去噪越多)
+    min_cluster_extent: 0.45      # 2D连通域过滤: 包围盒最长边 (m), 0=禁用
+    min_cluster_size: 30          # 2D连通域过滤: 最小像素数, 0=禁用
+    max_compact_ratio: 2.5        # 长宽比阈值: 长/短 > 此值认为是细长形(墙壁碎片)→强制保留
+                                  # 过滤逻辑: extent小 AND pixels小 AND 不是细长形 → 删除
+                                  # 即: 小且方块状 = 噪点; 小但细长 = 墙壁碎片 → 保留

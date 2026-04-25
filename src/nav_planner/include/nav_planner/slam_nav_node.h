@@ -52,10 +52,18 @@ public:
 private:
     // ---- 参数声明与加载 ----
     void DeclareAndLoadParams();
+    bool ConvertOutdoorGpsToLocal(double lat, double lon, double& x, double& y) const;
 
     // ---- 回调函数 ----
-    /// SLAM 里程计回调 (来自 Faster-LIO2)
-    void SlamOdomCallback(const nav_msgs::msg::Odometry::SharedPtr msg);
+    /// 统一定位里程计回调
+    void LocalizationOdomCallback(const nav_msgs::msg::Odometry::SharedPtr msg);
+
+    /// 运行时定位源切换命令回调 (来自 bridge 的 /nav_mode_cmd)
+    /// JSON 格式: {"action":"switch_odom","topic":"/localization","gps":false}
+    void NavModeCmdCallback(const std_msgs::msg::String::SharedPtr msg);
+
+    /// 运行时切换定位订阅话题（重新创建 subscription）
+    void SwitchLocalizationSource(const std::string& topic, bool gps_mode);
 
     /// RViz2 目标点回调 (map 坐标系)
     void GoalPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
@@ -65,6 +73,9 @@ private:
 
     /// 取消导航回调
     void NavCancelCallback(const std_msgs::msg::Bool::SharedPtr msg);
+
+    /// 暂停/继续导航回调 (true=暂停, false=继续)
+    void NavPauseCallback(const std_msgs::msg::Bool::SharedPtr msg);
 
     /// 初始位姿回调 (用于手动校正 SLAM 初始位置)
     void InitialPoseCallback(
@@ -102,10 +113,12 @@ private:
 
     // ==================== ROS2 接口 ====================
     // 订阅
-    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr slam_odom_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr localization_odom_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr nav_waypoints_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr   nav_cancel_sub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr   nav_pause_sub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr nav_mode_cmd_sub_;  // 运行时定位源切换
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
         initial_pose_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
@@ -134,12 +147,12 @@ private:
     // ==================== 状态数据 ====================
     std::mutex data_mutex_;
 
-    // 当前位姿 (来自 SLAM 里程计, map 坐标系)
+    // 当前位姿 (来自统一定位里程计)
     Pose2D current_pose_;
-    bool   slam_odom_received_ = false;
+    bool   localization_received_ = false;
 
-    // SLAM 位姿的 z 坐标 (室内可能有高度信息)
-    double slam_z_ = 0.0;
+    // 当前定位的 z 坐标
+    double current_z_ = 0.0;
 
     // 实际运动轨迹 (累积)
     nav_msgs::msg::Path actual_trajectory_;
@@ -154,11 +167,19 @@ private:
     size_t waypoint_index_ = 0;
     bool   multi_nav_active_ = false;
 
+    bool   nav_paused_ = false;        // 导航暂停标志
+
     // ==================== 参数 ====================
     double control_rate_ = 20.0;       // 控制循环频率 (Hz)
     double status_rate_  = 2.0;        // 状态发布频率 (Hz)
     bool   use_tf_pose_  = false;      // 是否从 TF 获取位姿 (而非 odom 话题)
+    std::string nav_mode_ = "slam";   // slam / gps
+    bool   gps_mode_ = false;          // 是否室外 GPS 模式
     std::string slam_odom_topic_ = "/slam/odom";   // SLAM 里程计话题名
+    std::string outdoor_odom_topic_ = "/outdoor/odom";  // 室外统一位姿话题
+    std::string localization_odom_topic_ = "/slam/odom";  // 当前生效的定位话题
+    double outdoor_ref_latitude_ = 36.66111;
+    double outdoor_ref_longitude_ = 117.01665;
     std::string map_frame_  = "map";                // 地图坐标系
     std::string base_frame_ = "base_link";           // 机器人坐标系
     std::string map_topic_  = "map";                   // OccupancyGrid 话题

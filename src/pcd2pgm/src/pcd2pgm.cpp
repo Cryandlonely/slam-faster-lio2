@@ -61,6 +61,9 @@ Pcd2PgmNode::Pcd2PgmNode(const rclcpp::NodeOptions & options) : Node("pcd2pgm", 
     radiusOutlierFilter(cloud_after_pass_through_, thre_radius_, thres_point_count_);
     statisticalOutlierFilter(cloud_after_radius_, sor_mean_k_, sor_stddev_thresh_);
     setMapTopicMsg(cloud_after_sor_, map_topic_msg_);
+    if (min_cluster_extent_m_ > 0.0 || min_cluster_size_ > 0) {
+      filterSmallClusters(map_topic_msg_, min_cluster_extent_m_, min_cluster_size_, max_compact_ratio_);
+    }
   }
 
   timer_ =
@@ -99,6 +102,9 @@ void Pcd2PgmNode::declareParameters()
   declare_parameter("thres_point_count", 10);
   declare_parameter("sor_mean_k", 50);             // 统计滤波: 计算均值的邻居数
   declare_parameter("sor_stddev_thresh", 1.0);      // 统计滤波: 标准差倍数阈值
+  declare_parameter("min_cluster_extent", 0.0);    // 2D连通域过滤: 包围盒最长边(m), 0=禁用
+  declare_parameter("min_cluster_size", 0);         // 2D连通域过滤: 最小像素数, 0=禁用
+  declare_parameter("max_compact_ratio", 2.5);      // 方块阈值: 长短边之比<=此値才认为方块噪点, 超过则是细长墙壁片段保留
   declare_parameter("map_topic_name", "map");
   declare_parameter("use_pgm", false);
   declare_parameter("pgm_file", "");
@@ -122,6 +128,9 @@ void Pcd2PgmNode::getParameters()
   get_parameter("thres_point_count", thres_point_count_);
   get_parameter("sor_mean_k", sor_mean_k_);
   get_parameter("sor_stddev_thresh", sor_stddev_thresh_);
+  get_parameter("min_cluster_extent", min_cluster_extent_m_);
+  get_parameter("min_cluster_size", min_cluster_size_);
+  get_parameter("max_compact_ratio", max_compact_ratio_);
   get_parameter("map_topic_name", map_topic_name_);
   get_parameter("use_pgm", use_pgm_);
   get_parameter("pgm_file", pgm_file_);
@@ -321,6 +330,108 @@ void Pcd2PgmNode::applyTransform()
   transform.rotate(Eigen::AngleAxisf(odom_to_lidar_odom_[5], Eigen::Vector3f::UnitZ()));
 
   pcl::transformPointCloud(*pcd_cloud_, *pcd_cloud_, transform.inverse());
+}
+
+void Pcd2PgmNode::filterSmallClusters(
+  nav_msgs::msg::OccupancyGrid & grid, double min_extent_m, int min_size, double max_compact_ratio)
+{
+  const int w = static_cast<int>(grid.info.width);
+  const int h = static_cast<int>(grid.info.height);
+  const int min_ext_px = (min_extent_m > 0.0)
+    ? static_cast<int>(std::ceil(min_extent_m / grid.info.resolution)) : 0;
+
+  // 4连通方向 (避免对角相邻将家具和墙合为同一大簇)
+  const int dx[] = {0, 1, 0, -1};
+  const int dy[] = {1, 0, -1, 0};
+
+  std::vector<int> labels(w * h, -1);
+
+  struct ClusterInfo {
+    int x_min, x_max, y_min, y_max;
+    int pixel_count;
+    bool remove;
+  };
+  std::vector<ClusterInfo> clusters;
+
+  // BFS 连通域标记 (4连通, 避免对角相邻合并家具和墙)
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      int idx = x + y * w;
+      if (grid.data[idx] != 100 || labels[idx] >= 0) continue;
+
+      int label = static_cast<int>(clusters.size());
+      ClusterInfo ci = {x, x, y, y, 0, false};
+      labels[idx] = label;
+
+      std::queue<std::pair<int, int>> q;
+      q.push({x, y});
+
+      while (!q.empty()) {
+        auto [cx, cy] = q.front();
+        q.pop();
+        ci.x_min = std::min(ci.x_min, cx);
+        ci.x_max = std::max(ci.x_max, cx);
+        ci.y_min = std::min(ci.y_min, cy);
+        ci.y_max = std::max(ci.y_max, cy);
+        ci.pixel_count++;
+
+        for (int d = 0; d < 4; d++) {
+          int nx = cx + dx[d], ny = cy + dy[d];
+          if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+          int nidx = nx + ny * w;
+          if (grid.data[nidx] != 100 || labels[nidx] >= 0) continue;
+          labels[nidx] = label;
+          q.push({nx, ny});
+        }
+      }
+
+      int max_extent = std::max(ci.x_max - ci.x_min, ci.y_max - ci.y_min);
+      int min_extent = std::min(ci.x_max - ci.x_min, ci.y_max - ci.y_min);
+      bool too_small_extent = (min_ext_px > 0) && (max_extent < min_ext_px);
+      bool too_few_pixels   = (min_size > 0) && (ci.pixel_count < min_size);
+      // 是否是细长形(墙壁碎片):
+      //   min_extent==0 且 max_extent>0: 单像素宽直线 (细长) → 保留
+      //   min_extent==0 且 max_extent==0: 孤立单点 → 非细长, 可删
+      //   max_extent > min_extent * ratio: 明显细长 → 保留
+      bool is_elongated = (min_extent == 0 && max_extent > 0) ||
+        (max_compact_ratio > 0.0 && max_extent > 0 &&
+         static_cast<double>(max_extent) > min_extent * max_compact_ratio);
+      // 删除条件: (extent小 AND pixels小) AND 不是细长形
+      // 即: 小且方块 = 噪点; 小但细长 = 墙壁碎片，保留
+      ci.remove = too_small_extent && too_few_pixels && !is_elongated;
+      clusters.push_back(ci);
+    }
+  }
+
+  // 打印每个簇的详细信息 (方便调参)
+  RCLCPP_INFO(get_logger(),
+    "Cluster filter: found %zu clusters (min_extent=%.2fm=%dpx, min_size=%d, max_compact_ratio=%.1f)",
+    clusters.size(), min_extent_m, min_ext_px, min_size, max_compact_ratio);
+  for (int i = 0; i < static_cast<int>(clusters.size()); i++) {
+    const auto & ci = clusters[i];
+    int ext_x = ci.x_max - ci.x_min;
+    int ext_y = ci.y_max - ci.y_min;
+    RCLCPP_INFO(get_logger(),
+      "  [%3d] pixels=%-5d extent_x=%-4d(%.2fm) extent_y=%-4d(%.2fm) ratio=%.1f -> %s",
+      i, ci.pixel_count,
+      ext_x, ext_x * grid.info.resolution,
+      ext_y, ext_y * grid.info.resolution,
+      (std::min(ext_x, ext_y) == 0) ? 99.0 : static_cast<double>(std::max(ext_x, ext_y)) / std::min(ext_x, ext_y),
+      ci.remove ? "REMOVE" : "keep");
+  }
+
+  // 清除被标记的簇
+  int removed = 0;
+  for (int i = 0; i < w * h; i++) {
+    if (grid.data[i] == 100 && labels[i] >= 0 && clusters[labels[i]].remove) {
+      grid.data[i] = 0;
+      removed++;
+    }
+  }
+
+  RCLCPP_INFO(get_logger(),
+    "Cluster filter done: removed %d occupied cells from %zu clusters",
+    removed, clusters.size());
 }
 
 }  // namespace pcd2pgm

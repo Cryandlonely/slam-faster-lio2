@@ -1239,34 +1239,7 @@ int main(int argc, char** argv)
 
     if (rclcpp::ok())
         rclcpp::shutdown();
-    /**************** save map ****************/
-    /* 1. make sure you have enough memories
-    /* 2. pcd save will largely influence the real-time performences **/
-    if (pcl_wait_save->size() > 0 && pcd_save_en)
-    {
-        // 1. Statistical outlier removal
-        pcl::StatisticalOutlierRemoval<PointType> sor;
-        sor.setInputCloud(pcl_wait_save);
-        sor.setMeanK(20);
-        sor.setStddevMulThresh(2.0);
-        PointCloudXYZI::Ptr cloud_filtered(new PointCloudXYZI);
-        sor.filter(*cloud_filtered);
-        cout << "Outlier removal: " << pcl_wait_save->size() << " -> " << cloud_filtered->size() << endl;
-
-        // 2. Voxel grid downsampling
-        pcl::VoxelGrid<PointType> vg;
-        vg.setInputCloud(cloud_filtered);
-        vg.setLeafSize(0.1f, 0.1f, 0.1f);
-        PointCloudXYZI::Ptr cloud_down(new PointCloudXYZI);
-        vg.filter(*cloud_down);
-        cout << "Voxel downsample: " << cloud_filtered->size() << " -> " << cloud_down->size() << endl;
-
-        string file_name = string("scans.pcd");
-        string all_points_dir(string(string(ROOT_DIR) + "PCD/") + file_name);
-        pcl::PCDWriter pcd_writer;
-        cout << "current scan saved to /PCD/" << file_name << endl;
-        pcd_writer.writeBinary(all_points_dir, *cloud_down);
-    }
+    // 地图保存已通过 /map_save service 在进程退出前完成, 此处不再重复保存
 
     if (runtime_pos_log)
     {

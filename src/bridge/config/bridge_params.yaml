@@ -18,3 +18,22 @@ bridge_node:
 
     # PCD 分片传输单包最大字节数
     trans_chunk_bytes: 65536
+
+    # ==================== 节点生命周期管理 ====================
+    # ROS2 工作区路径 (用于子进程 source setup.bash, 留空则继承当前环境)
+    ros2_workspace: "/home/lonely/slam/slam-faster-lio2"
+
+    # 建图 launch 使用的配置文件名 (在 location/config/ 目录下)
+    mapping_config_file: "mid360.yaml"
+
+    # 室内定位 launch 使用的配置文件名
+    localization_config_file: "mid360.yaml"
+
+    # 纯建图模式的定位话题 (FAST-LIO /Odometry, 仅当次运行有效)
+    indoor_mapping_odom_topic: "/Odometry"
+
+    # 室内定位模式的定位话题 (transform_fusion 输出, 跨会话全局位姿)
+    indoor_loc_odom_topic: "/localization"
+
+    # 室外 RTK 定位话题
+    outdoor_odom_topic: "/outdoor/odom"

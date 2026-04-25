@@ -7,7 +7,7 @@
 #include <std_msgs/msg/string.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 
-#include "chassis/chassis_can.h"
+#include "chassis/chassis_serial.h"
 
 #include <memory>
 #include <mutex>
@@ -25,17 +25,17 @@ private:
     // 订阅 /cmd_vel 回调: m/s → mm/s, rad/s → 0.001 rad/s
     void CmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
 
-    // 底盘反馈回调 (CAN 后台线程 → ROS2 发布)
-    void OnChassisFeedback(const ChassisCAN::FeedbackData& fb);
+    // 底盘反馈回调 (串口后台线程 → ROS2 发布)
+    void OnChassisFeedback(const ChassisSerial::FeedbackData& fb);
 
     // 安全看门狗: cmd_vel 超时未收到则急停
     void WatchdogCallback();
 
     // 发布反馈数据
-    void PublishFeedback(const ChassisCAN::FeedbackData& fb);
+    void PublishFeedback(const ChassisSerial::FeedbackData& fb);
 
-    // CAN 底层
-    std::unique_ptr<ChassisCAN> can_;
+    // 串口底层
+    std::unique_ptr<ChassisSerial> serial_;
 
     // 订阅
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
@@ -50,7 +50,7 @@ private:
     rclcpp::TimerBase::SharedPtr watchdog_timer_;
 
     // 参数
-    std::string can_interface_ = "can0";
+    std::string serial_port_ = "/dev/ttyUSB0";
     double max_vx_     = 1.0;   // m/s
     double max_vy_     = 0.8;   // m/s
     double max_vz_     = 1.0;   // rad/s

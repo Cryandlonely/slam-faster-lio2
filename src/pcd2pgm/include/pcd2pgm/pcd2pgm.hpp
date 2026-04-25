@@ -16,6 +16,7 @@
 #define PCD2PGM__PCD2PGM_HPP_
 
 #include <memory>
+#include <queue>
 #include <string>
 #include <vector>
 
@@ -54,6 +55,10 @@ private:
 
   bool loadMapFromPgm();
 
+  /// 2D 连通域过滤: 删除小且方块状的孤立占用块, 细长形簇(墙壁碎片)无论多短都保留
+  void filterSmallClusters(
+    nav_msgs::msg::OccupancyGrid & grid, double min_extent_m, int min_size, double max_compact_ratio);
+
   bool use_pgm_;
   std::string pgm_file_;
   double pgm_resolution_;
@@ -69,6 +74,9 @@ private:
   int thres_point_count_;
   int sor_mean_k_;
   double sor_stddev_thresh_;
+  double min_cluster_extent_m_;   // 最小保留连通域长度 (m), 0=禁用
+  int min_cluster_size_;           // 最小保留连通域像素数, 0=禁用
+  double max_compact_ratio_;       // 长宽比阈值: max_extent <= min_extent*ratio 才认为是方块噪点(可删)
   std::string pcd_file_;
   std::string map_topic_name_;
   std::vector<double> odom_to_lidar_odom_;

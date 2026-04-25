@@ -11,32 +11,30 @@ namespace chassis {
 ChassisNode::ChassisNode(const rclcpp::NodeOptions& options)
     : Node("chassis_node", options)
 {
-    RCLCPP_INFO(this->get_logger(), "=== ChassisNode 初始化 (履带车 CAN 控制) ===");
+    RCLCPP_INFO(this->get_logger(), "=== ChassisNode 初始化 (履带车 串口控制) ===");
 
     DeclareAndLoadParams();
 
-    // ---- CAN 初始化 ----
-    can_ = std::make_unique<ChassisCAN>(can_interface_);
-    if (!can_->open()) {
+    // ---- 串口初始化 ----
+    serial_ = std::make_unique<ChassisSerial>(serial_port_);
+    if (!serial_->open()) {
         RCLCPP_ERROR(this->get_logger(),
-            "无法打开 CAN 接口 [%s], 请确认:\n"
-            "  sudo ip link set %s type can bitrate 500000\n"
-            "  sudo ip link set %s up",
-            can_interface_.c_str(), can_interface_.c_str(), can_interface_.c_str());
-        throw std::runtime_error("CAN 接口打开失败: " + can_interface_);
+            "无法打开串口 [%s], 请确认串口设备存在且有读写权限",
+            serial_port_.c_str());
+        throw std::runtime_error("串口打开失败: " + serial_port_);
     }
-    RCLCPP_INFO(this->get_logger(), "CAN 接口 [%s] 已打开", can_interface_.c_str());
+    RCLCPP_INFO(this->get_logger(), "串口 [%s] 已打开", serial_port_.c_str());
 
     // 注册反馈回调
-    can_->setFeedbackCallback(
-        [this](const ChassisCAN::FeedbackData& fb) {
+    serial_->setFeedbackCallback(
+        [this](const ChassisSerial::FeedbackData& fb) {
             OnChassisFeedback(fb);
         });
 
     // 启动后台接收
-    if (!can_->startReceiving()) {
-        RCLCPP_ERROR(this->get_logger(), "CAN 后台接收启动失败");
-        throw std::runtime_error("CAN 后台接收启动失败");
+    if (!serial_->startReceiving()) {
+        RCLCPP_ERROR(this->get_logger(), "串口后台接收启动失败");
+        throw std::runtime_error("串口后台接收启动失败");
     }
 
     // ---- 订阅 ----
@@ -58,7 +56,7 @@ ChassisNode::ChassisNode(const rclcpp::NodeOptions& options)
         std::bind(&ChassisNode::WatchdogCallback, this));
 
     RCLCPP_INFO(this->get_logger(), "ChassisNode 初始化完成");
-    RCLCPP_INFO(this->get_logger(), "  CAN 接口: %s", can_interface_.c_str());
+    RCLCPP_INFO(this->get_logger(), "  串口: %s", serial_port_.c_str());
     RCLCPP_INFO(this->get_logger(), "  速度限幅: vx=%.1f vy=%.1f vz=%.1f", max_vx_, max_vy_, max_vz_);
     RCLCPP_INFO(this->get_logger(), "  看门狗超时: %.2f s", watchdog_timeout_);
     RCLCPP_INFO(this->get_logger(), "  订阅: /cmd_vel");
@@ -66,21 +64,21 @@ ChassisNode::ChassisNode(const rclcpp::NodeOptions& options)
 }
 
 ChassisNode::~ChassisNode() {
-    if (can_) {
-        can_->stop();
-        can_->stopReceiving();
-        can_->close();
+    if (serial_) {
+        serial_->stop();
+        serial_->stopReceiving();
+        serial_->close();
     }
 }
 
 void ChassisNode::DeclareAndLoadParams() {
-    this->declare_parameter<std::string>("can_interface", "can0");
+    this->declare_parameter<std::string>("serial_port", "/dev/ttyUSB0");
     this->declare_parameter<double>("max_vx", 1.0);
     this->declare_parameter<double>("max_vy", 0.8);
     this->declare_parameter<double>("max_vz", 1.0);
     this->declare_parameter<double>("watchdog_timeout", 0.5);
 
-    can_interface_    = this->get_parameter("can_interface").as_string();
+    serial_port_      = this->get_parameter("serial_port").as_string();
     max_vx_           = this->get_parameter("max_vx").as_double();
     max_vy_           = this->get_parameter("max_vy").as_double();
     max_vz_           = this->get_parameter("max_vz").as_double();
@@ -103,14 +101,14 @@ void ChassisNode::CmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
     auto vy_mm  = static_cast<int16_t>(std::round(vy * 1000.0));
     auto vz_mrad = static_cast<int16_t>(std::round(vz * 1000.0));
 
-    if (!can_->setVelocity(vx_mm, vy_mm, vz_mrad)) {
+    if (!serial_->setVelocity(vx_mm, vy_mm, vz_mrad)) {
         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-            "CAN 发送失败: vx=%d vy=%d vz=%d", vx_mm, vy_mm, vz_mrad);
+            "串口发送失败: vx=%d vy=%d vz=%d", vx_mm, vy_mm, vz_mrad);
     }
 }
 
-void ChassisNode::OnChassisFeedback(const ChassisCAN::FeedbackData& fb) {
-    // 此回调在 CAN 后台线程中调用, 需要线程安全地发布
+void ChassisNode::OnChassisFeedback(const ChassisSerial::FeedbackData& fb) {
+    // 此回调在串口后台线程中调用, 需要线程安全地发布
     PublishFeedback(fb);
 }
 
@@ -121,14 +119,14 @@ void ChassisNode::WatchdogCallback() {
 
     auto elapsed = (this->now() - last_cmd_time_).seconds();
     if (elapsed > watchdog_timeout_) {
-        can_->stop();
+        serial_->stop();
         cmd_received_ = false;
         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
             "cmd_vel 超时 (%.2fs), 已急停", elapsed);
     }
 }
 
-void ChassisNode::PublishFeedback(const ChassisCAN::FeedbackData& fb) {
+void ChassisNode::PublishFeedback(const ChassisSerial::FeedbackData& fb) {
     // IMU 消息
     auto imu_msg = sensor_msgs::msg::Imu();
     imu_msg.header.stamp = this->now();

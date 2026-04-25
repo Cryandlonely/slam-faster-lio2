@@ -224,31 +224,49 @@ int PurePursuitTracker::FindLookaheadPoint(const Pose2D& current,
                                             double lookahead_dist) const {
     if (path_.empty()) return -1;
 
+    auto* self = const_cast<PurePursuitTracker*>(this);
+
+    // ---- Step 1: 从当前 nearest_index_ 起找最近路径点 ----
+    {
+        double min_dist = 1e9;
+        for (int i = nearest_index_; i < static_cast<int>(path_.size()); ++i) {
+            double d = Distance(current.x, current.y, path_[i].x, path_[i].y);
+            if (d < min_dist) {
+                min_dist = d;
+                self->nearest_index_ = i;
+            } else if (d > min_dist + 1.0) {
+                break;
+            }
+        }
+    }
+
+    // ---- Step 2: 利用路径段投影推进 nearest_index_ ----
+    // 若机器人已冲过某路径点（到下一点的向量与机器人方向同侧），则跳过该点，
+    // 避免把身后的路径点当作前视目标，导致掉头行为。
+    while (nearest_index_ < static_cast<int>(path_.size()) - 1) {
+        double seg_dx = path_[nearest_index_ + 1].x - path_[nearest_index_].x;
+        double seg_dy = path_[nearest_index_ + 1].y - path_[nearest_index_].y;
+        double to_robot_x = current.x - path_[nearest_index_].x;
+        double to_robot_y = current.y - path_[nearest_index_].y;
+        // 点积 > 0 表示机器人已投影过该点，向前推进
+        if (seg_dx * to_robot_x + seg_dy * to_robot_y > 0.0) {
+            self->nearest_index_++;
+        } else {
+            break;
+        }
+    }
+
+    // ---- Step 3: 从推进后的 nearest_index_ 起搜索前视点 ----
     int best_idx = -1;
     double best_dist_diff = 1e9;
 
-    int start_idx = std::max(0, nearest_index_);
-
-    for (int i = start_idx; i < static_cast<int>(path_.size()); ++i) {
+    for (int i = nearest_index_; i < static_cast<int>(path_.size()); ++i) {
         double d = Distance(current.x, current.y, path_[i].x, path_[i].y);
         double diff = std::abs(d - lookahead_dist);
 
         if (d >= lookahead_dist * 0.5 && diff < best_dist_diff) {
             best_dist_diff = diff;
             best_idx = i;
-        }
-    }
-
-    if (best_idx >= 0) {
-        double min_dist = 1e9;
-        for (int i = nearest_index_; i < static_cast<int>(path_.size()); ++i) {
-            double d = Distance(current.x, current.y, path_[i].x, path_[i].y);
-            if (d < min_dist) {
-                min_dist = d;
-                const_cast<PurePursuitTracker*>(this)->nearest_index_ = i;
-            } else if (d > min_dist + 1.0) {
-                break;
-            }
         }
     }
 

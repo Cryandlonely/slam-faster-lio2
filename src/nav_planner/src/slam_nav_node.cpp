@@ -13,6 +13,9 @@
 #include "nav_planner/common/math_utils.h"
 
 #include <chrono>
+#include <cctype>
+#include <cmath>
+#include <iomanip>
 #include <sstream>
 #include <nlohmann/json.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -22,10 +25,39 @@ using namespace std::chrono_literals;
 
 namespace slam_nav {
 
+namespace {
+
+
+std::string ToLowerCopy(std::string value) {
+    for (char& ch : value) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return value;
+}
+
+std::string ResolveCoordMode(const nlohmann::json& j) {
+    if (j.contains("coord_mode") && j["coord_mode"].is_string()) {
+        return ToLowerCopy(j["coord_mode"].get<std::string>());
+    }
+    if (j.contains("input_mode") && j["input_mode"].is_string()) {
+        auto mode = ToLowerCopy(j["input_mode"].get<std::string>());
+        if (mode == "indoor") return "local";
+        if (mode == "outdoor") return "gps";
+    }
+    return "local";
+}
+
+double HeadingDegToEnuYaw(double heading_deg) {
+    double yaw_enu = kPi / 2.0 - heading_deg * kDegToRad;
+    return NormalizeAngle(yaw_enu);
+}
+
+}  // namespace
+
 SlamNavNode::SlamNavNode(const rclcpp::NodeOptions& options)
     : Node("slam_nav_node", options)
 {
-    RCLCPP_INFO(this->get_logger(), "=== SlamNavNode 初始化 (室内SLAM导航) ===");
+    RCLCPP_INFO(this->get_logger(), "=== SlamNavNode 初始化 ===");
 
     // ---- 参数声明与加载 ----
     DeclareAndLoadParams();
@@ -42,10 +74,10 @@ SlamNavNode::SlamNavNode(const rclcpp::NodeOptions& options)
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
     // ---- 订阅 ----
-    // SLAM 里程计 (来自 Faster-LIO2)
-    slam_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-        slam_odom_topic_, 10,
-        std::bind(&SlamNavNode::SlamOdomCallback, this, std::placeholders::_1));
+    // 统一定位里程计: slam 模式来自 Faster-LIO2, gps 模式来自 /outdoor/odom
+    localization_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+        localization_odom_topic_, 10,
+        std::bind(&SlamNavNode::LocalizationOdomCallback, this, std::placeholders::_1));
 
     // RViz2 目标点 (map 坐标系)
     goal_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
@@ -61,6 +93,16 @@ SlamNavNode::SlamNavNode(const rclcpp::NodeOptions& options)
     nav_cancel_sub_ = this->create_subscription<std_msgs::msg::Bool>(
         "/nav_cancel", 10,
         std::bind(&SlamNavNode::NavCancelCallback, this, std::placeholders::_1));
+
+    // 暂停/继续导航
+    nav_pause_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+        "/nav_pause", 10,
+        std::bind(&SlamNavNode::NavPauseCallback, this, std::placeholders::_1));
+
+    // 运行时定位源切换 (来自 bridge)
+    nav_mode_cmd_sub_ = this->create_subscription<std_msgs::msg::String>(
+        "/nav_mode_cmd", 10,
+        std::bind(&SlamNavNode::NavModeCmdCallback, this, std::placeholders::_1));
 
     // 初始位姿 (RViz2 的 2D Pose Estimate)
     initial_pose_sub_ = this->create_subscription<
@@ -119,9 +161,10 @@ SlamNavNode::SlamNavNode(const rclcpp::NodeOptions& options)
         });
 
     RCLCPP_INFO(this->get_logger(), "SlamNavNode 初始化完成");
-    RCLCPP_INFO(this->get_logger(), "  SLAM里程计话题: %s", slam_odom_topic_.c_str());
+    RCLCPP_INFO(this->get_logger(), "  模式: %s", nav_mode_.c_str());
+    RCLCPP_INFO(this->get_logger(), "  定位话题: %s", localization_odom_topic_.c_str());
     RCLCPP_INFO(this->get_logger(), "  订阅: %s, goal_pose, /nav_waypoints, /nav_cancel, /initialpose, %s",
-                slam_odom_topic_.c_str(), map_topic_.c_str());
+                localization_odom_topic_.c_str(), map_topic_.c_str());
     RCLCPP_INFO(this->get_logger(), "  发布: /planned_path, /actual_trajectory, /nav_status, "
                 "/current_pose, /tracking_debug, /cmd_vel, /goal_marker");
     RCLCPP_INFO(this->get_logger(), "  规划器: %s", use_astar_ ? "A* 避障规划" : "直线规划");
@@ -133,6 +176,10 @@ SlamNavNode::SlamNavNode(const rclcpp::NodeOptions& options)
 // ==================== 参数声明与加载 ====================
 
 void SlamNavNode::DeclareAndLoadParams() {
+    this->declare_parameter<std::string>("nav.mode", "slam");
+    nav_mode_ = this->get_parameter("nav.mode").as_string();
+    gps_mode_ = (nav_mode_ == "gps");
+
     // -- SLAM 配置 --
     this->declare_parameter<std::string>("slam.odom_topic", "/slam/odom");
     this->declare_parameter<std::string>("slam.map_frame", "map");
@@ -143,11 +190,31 @@ void SlamNavNode::DeclareAndLoadParams() {
     base_frame_ = this->get_parameter("slam.base_frame").as_string();
     use_tf_pose_ = this->get_parameter("slam.use_tf_pose").as_bool();
 
+    // -- 室外定位配置 --
+    this->declare_parameter<std::string>("outdoor.odom_topic", "/outdoor/odom");
+    this->declare_parameter<double>("outdoor.ref_latitude", 36.66111);
+    this->declare_parameter<double>("outdoor.ref_longitude", 117.01665);
+    outdoor_odom_topic_ = this->get_parameter("outdoor.odom_topic").as_string();
+    outdoor_ref_latitude_ = this->get_parameter("outdoor.ref_latitude").as_double();
+    outdoor_ref_longitude_ = this->get_parameter("outdoor.ref_longitude").as_double();
+
     // -- 地图配置 --
     this->declare_parameter<std::string>("planning.map_topic", "map");
     this->declare_parameter<bool>("planning.use_astar", true);
     map_topic_  = this->get_parameter("planning.map_topic").as_string();
     use_astar_  = this->get_parameter("planning.use_astar").as_bool();
+
+    localization_odom_topic_ = gps_mode_ ? outdoor_odom_topic_ : slam_odom_topic_;
+    if (gps_mode_) {
+        if (use_tf_pose_) {
+            RCLCPP_WARN(this->get_logger(), "gps 模式下忽略 slam.use_tf_pose, 改为使用 %s", outdoor_odom_topic_.c_str());
+            use_tf_pose_ = false;
+        }
+        if (use_astar_) {
+            RCLCPP_WARN(this->get_logger(), "gps 模式下强制关闭 A*，改用直线规划");
+            use_astar_ = false;
+        }
+    }
 
     // -- 控制频率 --
     this->declare_parameter<double>("control.rate", 20.0);
@@ -193,7 +260,7 @@ void SlamNavNode::DeclareAndLoadParams() {
     this->declare_parameter<double>("tracking.heading_kp", tp.heading_kp);
     this->declare_parameter<double>("tracking.cte_kp", tp.cte_kp);
     this->declare_parameter<double>("tracking.cmd_filter_alpha", tp.cmd_filter_alpha);
-    this->declare_parameter<double>("tracking.heading_align_threshold", tp.heading_align_threshold);
+    this->declare_parameter<double>("tracking.heading_align_threshold", 30.0);  // 度
     tp.lookahead_distance   = this->get_parameter("tracking.lookahead_distance").as_double();
     tp.min_lookahead        = this->get_parameter("tracking.min_lookahead").as_double();
     tp.max_lookahead        = this->get_parameter("tracking.max_lookahead").as_double();
@@ -206,7 +273,7 @@ void SlamNavNode::DeclareAndLoadParams() {
     tp.heading_kp           = this->get_parameter("tracking.heading_kp").as_double();
     tp.cte_kp               = this->get_parameter("tracking.cte_kp").as_double();
     tp.cmd_filter_alpha     = this->get_parameter("tracking.cmd_filter_alpha").as_double();
-    tp.heading_align_threshold = this->get_parameter("tracking.heading_align_threshold").as_double();
+    tp.heading_align_threshold = this->get_parameter("tracking.heading_align_threshold").as_double() * M_PI / 180.0;  // 度→弧度
     tracker_.SetParams(tp);
 
     // -- SDK 接口参数 --
@@ -223,20 +290,82 @@ void SlamNavNode::DeclareAndLoadParams() {
     sp.enable_posture = this->get_parameter("sdk.enable_posture_fields").as_bool();
     sdk_interface_.SetParams(sp);
 
-    RCLCPP_INFO(this->get_logger(), "参数加载完成: slam_odom=%s rate=%.0fHz",
-                slam_odom_topic_.c_str(), control_rate_);
+    RCLCPP_INFO(this->get_logger(), "参数加载完成: mode=%s odom=%s rate=%.0fHz",
+                nav_mode_.c_str(), localization_odom_topic_.c_str(), control_rate_);
+}
+
+bool SlamNavNode::ConvertOutdoorGpsToLocal(double lat, double lon, double& x, double& y) const {
+    if (!std::isfinite(lat) || !std::isfinite(lon)) {
+        return false;
+    }
+    // 与 rtk_node 保持完全一致的简化平面投影公式 (111320.0 m/deg)
+    // 保证 RTK 定位坐标系 与 GPS 航点转换坐标系 完全对齐
+    constexpr double kMetersPerDegreeLat = 111320.0;
+    const double meters_per_degree_lon =
+        111320.0 * std::cos(outdoor_ref_latitude_ * kDegToRad);
+
+    x = (lon - outdoor_ref_longitude_) * meters_per_degree_lon;
+    y = (lat - outdoor_ref_latitude_) * kMetersPerDegreeLat;
+    return std::isfinite(x) && std::isfinite(y);
 }
 
 // ==================== 回调函数 ====================
 
-void SlamNavNode::SlamOdomCallback(
+void SlamNavNode::SwitchLocalizationSource(const std::string& topic, bool gps_mode) {
+    {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        if (topic == localization_odom_topic_ && gps_mode == gps_mode_) {
+            RCLCPP_INFO(this->get_logger(), "定位源未变化: %s", topic.c_str());
+            return;
+        }
+        localization_odom_topic_ = topic;
+        gps_mode_  = gps_mode;
+        nav_mode_  = gps_mode ? "gps" : "slam";
+        if (gps_mode_) {
+            use_astar_ = false;
+        } else {
+            // 切回 SLAM 模式时, 从参数恢复 use_astar (避免室内永远直线规划撞墙)
+            use_astar_ = this->get_parameter("planning.use_astar").as_bool();
+            use_tf_pose_ = this->get_parameter("slam.use_tf_pose").as_bool();
+        }
+        localization_received_ = false;
+        localization_odom_sub_.reset();  // 先重置旧订阅
+    }
+
+    // create_subscription 不能持锁调用
+    localization_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+        topic, 10,
+        std::bind(&SlamNavNode::LocalizationOdomCallback, this, std::placeholders::_1));
+
+    RCLCPP_INFO(this->get_logger(), "定位源已切换: topic=%s gps=%d 规划器=%s",
+                topic.c_str(), gps_mode_, use_astar_ ? "A*" : "直线");
+}
+
+void SlamNavNode::NavModeCmdCallback(const std_msgs::msg::String::SharedPtr msg) {
+    try {
+        auto j = nlohmann::json::parse(msg->data);
+        std::string action = j.value("action", "");
+
+        if (action == "switch_odom") {
+            std::string topic = j.value("topic", localization_odom_topic_);
+            bool gps = j.value("gps", false);
+            SwitchLocalizationSource(topic, gps);
+        } else {
+            RCLCPP_WARN(this->get_logger(), "[NavModeCmd] 未知 action: %s", action.c_str());
+        }
+    } catch (const nlohmann::json::exception& e) {
+        RCLCPP_WARN(this->get_logger(), "[NavModeCmd] JSON 解析失败: %s", e.what());
+    }
+}
+
+void SlamNavNode::LocalizationOdomCallback(
     const nav_msgs::msg::Odometry::SharedPtr msg) {
     std::lock_guard<std::mutex> lock(data_mutex_);
 
-    // SLAM 里程计同时提供位置和朝向 (与 RTK 的双话题不同)
+    // 统一定位里程计同时提供位置和朝向
     current_pose_.x = msg->pose.pose.position.x;
     current_pose_.y = msg->pose.pose.position.y;
-    slam_z_ = msg->pose.pose.position.z;
+    current_z_ = msg->pose.pose.position.z;
 
     // 从四元数提取 yaw
     current_pose_.yaw = QuaternionToYaw(
@@ -245,7 +374,7 @@ void SlamNavNode::SlamOdomCallback(
         msg->pose.pose.orientation.y,
         msg->pose.pose.orientation.z);
 
-    slam_odom_received_ = true;
+    localization_received_ = true;
 }
 
 void SlamNavNode::GoalPoseCallback(
@@ -284,12 +413,25 @@ void SlamNavNode::NavCancelCallback(
 
     RCLCPP_INFO(this->get_logger(), "收到取消导航命令");
 
+    nav_paused_ = false;   // 取消时同时清除暂停状态
     CancelMultiNav();
     goal_pose_.reset();
     state_machine_.HandleEvent(NavEvent::CANCEL);
     tracker_.Reset();
     planner_.ClearPath();
     PublishStopCmd();
+}
+
+void SlamNavNode::NavPauseCallback(
+    const std_msgs::msg::Bool::SharedPtr msg) {
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    nav_paused_ = msg->data;
+    if (nav_paused_) {
+        PublishStopCmd();
+        RCLCPP_INFO(this->get_logger(), "导航已暂停");
+    } else {
+        RCLCPP_INFO(this->get_logger(), "导航已继续");
+    }
 }
 
 void SlamNavNode::InitialPoseCallback(
@@ -328,6 +470,20 @@ void SlamNavNode::NavWaypointsCallback(
 
         waypoint_queue_.clear();
         waypoint_index_ = 0;
+        const std::string coord_mode = ResolveCoordMode(j);
+
+        if (coord_mode != "local" && coord_mode != "gps") {
+            RCLCPP_WARN(this->get_logger(),
+                        "收到 /nav_waypoints 但 coord_mode=%s 不支持, 仅支持 local/gps",
+                        coord_mode.c_str());
+            return;
+        }
+        if (coord_mode == "gps" && !gps_mode_) {
+            RCLCPP_WARN(this->get_logger(),
+                        "收到 GPS 航点, 但当前 nav.mode=%s, 请切换到 gps 模式",
+                        nav_mode_.c_str());
+            return;
+        }
 
         // 读取命令中的目标速度
         if (j.contains("target_vel") && j["target_vel"].is_number()) {
@@ -342,17 +498,39 @@ void SlamNavNode::NavWaypointsCallback(
         }
 
         for (const auto& wp : j["waypoints"]) {
-            // 室内SLAM导航: 航点使用 map 坐标系本地坐标
-            if (!wp.contains("x") || !wp.contains("y")) {
-                RCLCPP_WARN(this->get_logger(),
-                    "跳过无效航点: 缺少 x 或 y 字段");
-                continue;
-            }
             Pose2D pose;
-            pose.x = wp["x"].get<double>();
-            pose.y = wp["y"].get<double>();
-            pose.yaw = wp.value("yaw", 0.0);
-            pose.yaw_specified = wp.contains("yaw");  // 标记用户是否指定了 yaw
+
+            if (coord_mode == "gps") {
+                if (!wp.contains("lat") || !wp.contains("lon")) {
+                    RCLCPP_WARN(this->get_logger(),
+                        "跳过无效 GPS 航点: 缺少 lat 或 lon 字段");
+                    continue;
+                }
+                double x = 0.0, y = 0.0;
+                if (!ConvertOutdoorGpsToLocal(wp["lat"].get<double>(), wp["lon"].get<double>(), x, y)) {
+                    RCLCPP_WARN(this->get_logger(), "跳过无效 GPS 航点: 经纬度转换失败");
+                    continue;
+                }
+                pose.x = x;
+                pose.y = y;
+                if (wp.contains("yaw")) {
+                    pose.yaw = wp["yaw"].get<double>();
+                    pose.yaw_specified = true;
+                } else if (wp.contains("heading_deg")) {
+                    pose.yaw = HeadingDegToEnuYaw(wp["heading_deg"].get<double>());
+                    pose.yaw_specified = true;
+                }
+            } else {
+                if (!wp.contains("x") || !wp.contains("y")) {
+                    RCLCPP_WARN(this->get_logger(),
+                        "跳过无效本地航点: 缺少 x 或 y 字段");
+                    continue;
+                }
+                pose.x = wp["x"].get<double>();
+                pose.y = wp["y"].get<double>();
+                pose.yaw = wp.value("yaw", 0.0);
+                pose.yaw_specified = wp.contains("yaw");
+            }
             waypoint_queue_.push_back(pose);
         }
 
@@ -376,7 +554,7 @@ void SlamNavNode::NavWaypointsCallback(
                 waypoint_queue_[i].yaw = Azimuth(
                     waypoint_queue_[i-1].x, waypoint_queue_[i-1].y,
                     waypoint_queue_[i].x, waypoint_queue_[i].y);
-            } else if (slam_odom_received_) {
+            } else if (localization_received_) {
                 // 单航点且未指定 yaw: 使用行驶方向
                 waypoint_queue_[i].yaw = Azimuth(
                     current_pose_.x, current_pose_.y,
@@ -389,8 +567,8 @@ void SlamNavNode::NavWaypointsCallback(
         goal_pose_ = waypoint_queue_.back();
 
         RCLCPP_INFO(this->get_logger(),
-                    "收到多航点任务: %zu 个航点 (map坐标系)",
-                    waypoint_queue_.size());
+                    "收到多航点任务: %zu 个航点, coord_mode=%s",
+                    waypoint_queue_.size(), coord_mode.c_str());
 
         state_machine_.HandleEvent(NavEvent::GOAL_RECEIVED);
 
@@ -433,7 +611,7 @@ void SlamNavNode::ControlLoop() {
         Pose2D tf_pose;
         if (GetPoseFromTF(tf_pose)) {
             current_pose_ = tf_pose;
-            slam_odom_received_ = true;
+            localization_received_ = true;
         }
     }
 
@@ -445,9 +623,9 @@ void SlamNavNode::ControlLoop() {
             break;
 
         case NavState::PLANNING: {
-            if (!slam_odom_received_) {
+            if (!localization_received_) {
                 RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
-                    "等待 SLAM 里程计数据 (%s)...", slam_odom_topic_.c_str());
+                    "等待定位里程计数据 (%s)...", localization_odom_topic_.c_str());
                 return;
             }
 
@@ -477,22 +655,46 @@ void SlamNavNode::ControlLoop() {
                     RCLCPP_INFO(this->get_logger(), "A* 路径规划成功, %zu 个路径点",
                                 astar_planner_.GetPath().size());
                 } else {
-                    RCLCPP_WARN(this->get_logger(), "A* 规划失败, 回退到直线规划");
-                    // 回退到直线规划
                     ok = false;
                 }
             }
 
             if (!ok) {
-                // A* 规划失败, 室内环境禁止直线规划(会撞墙)
-                state_machine_.HandleEvent(NavEvent::PLAN_FAILED);
-                RCLCPP_ERROR(this->get_logger(),
-                    "A* 路径规划失败 (目标可能不可达), 已取消导航");
+                // gps 模式或显式关闭 A* 时, 使用直线规划
+                if (!use_astar_) {
+                    if (multi_nav_active_ && waypoint_queue_.size() > 1) {
+                        ok = planner_.PlanMulti(current_pose_, waypoint_queue_);
+                    } else {
+                        ok = planner_.Plan(current_pose_, goal_pose_.value(), true);
+                    }
+
+                    if (ok && planner_.HasValidPath()) {
+                        tracker_.SetPath(planner_.GetPath(), true);
+                        state_machine_.HandleEvent(NavEvent::PLAN_SUCCESS);
+                        actual_trajectory_.poses.clear();
+                        last_traj_x_ = current_pose_.x;
+                        last_traj_y_ = current_pose_.y;
+                        RCLCPP_INFO(this->get_logger(), "直线路径规划成功, %zu 个路径点",
+                                    planner_.GetPath().size());
+                    } else {
+                        state_machine_.HandleEvent(NavEvent::PLAN_FAILED);
+                        RCLCPP_ERROR(this->get_logger(), "直线路径规划失败");
+                    }
+                } else {
+                    // A* 规划失败, 室内环境禁止直线规划(会撞墙)
+                    state_machine_.HandleEvent(NavEvent::PLAN_FAILED);
+                    RCLCPP_ERROR(this->get_logger(),
+                        "A* 路径规划失败 (目标可能不可达), 已取消导航");
+                }
             }
             break;
         }
 
         case NavState::TRACKING: {
+            if (nav_paused_) {
+                PublishStopCmd();
+                return;
+            }
             OmniControlCmd cmd;
             bool tracking = tracker_.ComputeControl(current_pose_, cmd);
 
@@ -566,28 +768,34 @@ void SlamNavNode::PublishPath() {
 void SlamNavNode::PublishStatus() {
     auto msg = std_msgs::msg::String();
     std::ostringstream oss;
-    oss << "{\"state\":\"" << state_machine_.GetStateString() << "\""
-        << ",\"x\":" << current_pose_.x
-        << ",\"y\":" << current_pose_.y
-        << ",\"yaw\":" << current_pose_.yaw
-        << ",\"slam_valid\":" << (slam_odom_received_ ? "true" : "false");
+    std::string state_str = (nav_paused_ && state_machine_.GetState() == NavState::TRACKING)
+        ? "PAUSED" : NavStateToString(state_machine_.GetState());
 
-    if (goal_pose_.has_value()) {
-        oss << ",\"goal_x\":" << goal_pose_->x
-            << ",\"goal_y\":" << goal_pose_->y;
+    if (gps_mode_) {
+        // 室外模式: 逆算回经纬度，yaw 为车辆朝向（弧度）
+        const double meters_per_deg_lon =
+            111320.0 * std::cos(outdoor_ref_latitude_ * kDegToRad);
+        const double lat = outdoor_ref_latitude_  + current_pose_.y / 111320.0;
+        const double lon = outdoor_ref_longitude_ + current_pose_.x / meters_per_deg_lon;
+        oss << std::fixed << std::setprecision(8)
+            << "{\"type\":\"pose\""
+            << ",\"lat\":" << lat
+            << ",\"lon\":" << lon
+            << std::setprecision(4)
+            << ",\"yaw\":" << current_pose_.yaw
+            << ",\"state\":\"" << state_str << "\""
+            << "}";
+    } else {
+        // 室内模式: map 坐标系 x/y（米），yaw（弧度）
+        oss << std::fixed << std::setprecision(4)
+            << "{\"type\":\"pose\""
+            << ",\"x\":" << current_pose_.x
+            << ",\"y\":" << current_pose_.y
+            << ",\"yaw\":" << current_pose_.yaw
+            << ",\"state\":\"" << state_str << "\""
+            << "}";
     }
 
-    auto debug = tracker_.GetDebugInfo();
-    oss << ",\"dist_to_goal\":" << debug.distance_to_goal
-        << ",\"cross_track_error\":" << debug.cross_track_error;
-
-    if (multi_nav_active_) {
-        oss << ",\"multi_nav\":true"
-            << ",\"waypoint_index\":" << waypoint_index_
-            << ",\"waypoint_total\":" << waypoint_queue_.size();
-    }
-
-    oss << "}";
     msg.data = oss.str();
     status_pub_->publish(msg);
 }
@@ -598,7 +806,7 @@ void SlamNavNode::PublishCurrentPose() {
     msg.header.frame_id = map_frame_;
     msg.pose.position.x = current_pose_.x;
     msg.pose.position.y = current_pose_.y;
-    msg.pose.position.z = slam_z_;
+    msg.pose.position.z = current_z_;
 
     auto q = YawToQuaternion(current_pose_.yaw);
     msg.pose.orientation.w = q.w;
@@ -637,7 +845,7 @@ void SlamNavNode::PublishStopCmd() {
 }
 
 void SlamNavNode::PublishTF() {
-    if (!slam_odom_received_) return;
+    if (!localization_received_) return;
 
     geometry_msgs::msg::TransformStamped t;
     t.header.stamp = this->now();
@@ -646,7 +854,7 @@ void SlamNavNode::PublishTF() {
 
     t.transform.translation.x = current_pose_.x;
     t.transform.translation.y = current_pose_.y;
-    t.transform.translation.z = slam_z_;
+    t.transform.translation.z = current_z_;
 
     auto q = YawToQuaternion(current_pose_.yaw);
     t.transform.rotation.w = q.w;
@@ -658,7 +866,7 @@ void SlamNavNode::PublishTF() {
 }
 
 void SlamNavNode::PublishActualTrajectory() {
-    if (!slam_odom_received_) return;
+    if (!localization_received_) return;
 
     double dx = current_pose_.x - last_traj_x_;
     double dy = current_pose_.y - last_traj_y_;
