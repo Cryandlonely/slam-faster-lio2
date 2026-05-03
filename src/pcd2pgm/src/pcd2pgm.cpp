@@ -404,20 +404,20 @@ void Pcd2PgmNode::filterSmallClusters(
   }
 
   // 打印每个簇的详细信息 (方便调参)
-  RCLCPP_INFO(get_logger(),
-    "Cluster filter: found %zu clusters (min_extent=%.2fm=%dpx, min_size=%d, max_compact_ratio=%.1f)",
-    clusters.size(), min_extent_m, min_ext_px, min_size, max_compact_ratio);
+  // RCLCPP_INFO(get_logger(),
+  //   "Cluster filter: found %zu clusters (min_extent=%.2fm=%dpx, min_size=%d, max_compact_ratio=%.1f)",
+  //   clusters.size(), min_extent_m, min_ext_px, min_size, max_compact_ratio);
   for (int i = 0; i < static_cast<int>(clusters.size()); i++) {
     const auto & ci = clusters[i];
     int ext_x = ci.x_max - ci.x_min;
     int ext_y = ci.y_max - ci.y_min;
-    RCLCPP_INFO(get_logger(),
-      "  [%3d] pixels=%-5d extent_x=%-4d(%.2fm) extent_y=%-4d(%.2fm) ratio=%.1f -> %s",
-      i, ci.pixel_count,
-      ext_x, ext_x * grid.info.resolution,
-      ext_y, ext_y * grid.info.resolution,
-      (std::min(ext_x, ext_y) == 0) ? 99.0 : static_cast<double>(std::max(ext_x, ext_y)) / std::min(ext_x, ext_y),
-      ci.remove ? "REMOVE" : "keep");
+    // RCLCPP_INFO(get_logger(),
+    //   "  [%3d] pixels=%-5d extent_x=%-4d(%.2fm) extent_y=%-4d(%.2fm) ratio=%.1f -> %s",
+    //   i, ci.pixel_count,
+    //   ext_x, ext_x * grid.info.resolution,
+    //   ext_y, ext_y * grid.info.resolution,
+    //   (std::min(ext_x, ext_y) == 0) ? 99.0 : static_cast<double>(std::max(ext_x, ext_y)) / std::min(ext_x, ext_y),
+    //   ci.remove ? "REMOVE" : "keep");
   }
 
   // 清除被标记的簇

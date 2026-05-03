@@ -56,7 +56,7 @@ private:
 
     mutable std::mutex clients_mutex_;
     std::vector<int> client_fds_;
-    std::vector<std::thread> client_threads_;
+    // client 线程均已 detach, 无需管理 thread 对象
 
     MessageCallback msg_cb_;
     ConnectCallback conn_cb_;

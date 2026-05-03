@@ -12,7 +12,7 @@ rtk_node:
     # 校准方法: 让狗面朝某个已知方向 (如正北=0°, 正东=90°, 正南=180°, 正西=270°)
     #   offset = 狗实际朝向(度) - RTK报告值(度)
     # 例如: 狗朝正西(270°), RTK报 0° → offset = 270
-    antenna_heading_offset_deg: -90.0
+    antenna_heading_offset_deg: -270.0
 
     # ==================== 坐标参考点 ====================
     # !! 必须与 nav_planner/config/slam_nav_params.yaml 中的

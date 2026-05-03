@@ -24,6 +24,11 @@ void PurePursuitTracker::SetPath(const std::vector<Waypoint>& path, bool is_fina
     position_reached_ = false;
     is_final_segment_ = is_final;
     debug_info_ = TrackingDebugInfo{};
+    // 重置低通滤波状态, 防止旧速度命令残留导致新路径起步时方向错误
+    prev_vx_ = 0.0;
+    prev_vy_ = 0.0;
+    prev_yaw_rate_ = 0.0;
+    prev_speed_ = 0.0;
 }
 
 bool PurePursuitTracker::ComputeControl(const Pose2D& current,
@@ -191,6 +196,19 @@ bool PurePursuitTracker::ComputeControl(const Pose2D& current,
     cmd.vx       = alpha * cmd.vx       + (1.0 - alpha) * prev_vx_;
     cmd.vy       = alpha * cmd.vy       + (1.0 - alpha) * prev_vy_;
     cmd.yaw_rate = alpha * cmd.yaw_rate + (1.0 - alpha) * prev_yaw_rate_;
+
+    // ---- 10. 加速度限幅 (防止起步/路径切换时速度突变) ----
+    if (params_.max_accel > 0.0 && params_.control_dt > 0.0) {
+        double max_dv = params_.max_accel * params_.control_dt;
+        double dvx = cmd.vx - prev_vx_;
+        double dvy = cmd.vy - prev_vy_;
+        double dv  = std::sqrt(dvx * dvx + dvy * dvy);
+        if (dv > max_dv) {
+            double scale = max_dv / dv;
+            cmd.vx = prev_vx_ + dvx * scale;
+            cmd.vy = prev_vy_ + dvy * scale;
+        }
+    }
 
     prev_vx_ = cmd.vx;
     prev_vy_ = cmd.vy;

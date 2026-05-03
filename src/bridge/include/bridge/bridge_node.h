@@ -120,8 +120,6 @@ private:
     std::mutex status_mutex_;
     std::string nav_status_json_     = "{}";
     std::string chassis_fb_json_     = "{}";
-    double slam_x_ = 0.0, slam_y_ = 0.0, slam_yaw_ = 0.0;
-    bool   slam_valid_ = false;
     float  battery_voltage_ = 0.0f;
     std::string nav_state_last_;   // 上一帧导航状态，用于检测 REACHED/ERROR 跳变
 };

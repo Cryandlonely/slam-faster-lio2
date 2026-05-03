@@ -99,7 +99,10 @@ void AStarPlanner::GridToWorld(int gx, int gy, double& wx, double& wy) const {
 
 bool AStarPlanner::IsTraversable(int gx, int gy) const {
     if (gx < 0 || gx >= map_width_ || gy < 0 || gy >= map_height_) return false;
-    return costmap_[gy * map_width_ + gx] == 0;
+    if (costmap_[gy * map_width_ + gx] != 0) return false;
+    // 检查动态障碍层 (调用者已在 map_mutex_ 保护下)
+    int k = gy * map_width_ + gx;
+    return dynamic_cells_.find(k) == dynamic_cells_.end();
 }
 
 bool AStarPlanner::FindNearestFreeCell(const Cell& from, Cell& result, int max_radius) const {
@@ -426,6 +429,11 @@ void AStarPlanner::ClearPath() {
     valid_ = false;
 }
 
+void AStarPlanner::RestorePath(const std::vector<Waypoint>& saved_path) {
+    path_ = saved_path;
+    valid_ = !path_.empty();
+}
+
 nav_msgs::msg::OccupancyGrid AStarPlanner::GetInflatedCostmapMsg() const {
     nav_msgs::msg::OccupancyGrid grid;
     grid.header.frame_id = "map";
@@ -439,7 +447,99 @@ nav_msgs::msg::OccupancyGrid AStarPlanner::GetInflatedCostmapMsg() const {
     for (size_t i = 0; i < costmap_.size(); ++i) {
         grid.data[i] = (costmap_[i] == 255) ? 100 : 0;
     }
+    // 叠加动态障碍
+    {
+        std::lock_guard<std::mutex> lk(map_mutex_);
+        for (auto& [k, _] : dynamic_cells_) {
+            if (k >= 0 && k < static_cast<int>(grid.data.size())) {
+                grid.data[k] = 50;  // 用灰色标识动态障碍
+            }
+        }
+    }
     return grid;
+}
+
+// ==================================================================
+// 动态障碍物管理
+// ==================================================================
+
+void AStarPlanner::UpdateDynamicObstacles(
+    const std::vector<std::pair<double,double>>& map_points,
+    rclcpp::Time now, double ttl_sec)
+{
+    if (!has_map_ || map_points.empty()) return;
+    std::lock_guard<std::mutex> lk(map_mutex_);
+
+    rclcpp::Time expiry = now + rclcpp::Duration::from_seconds(ttl_sec);
+    // 动态障碍膨胀半径与静态障碍保持一致, 确保机器人体宽范围内的障碍能被检测到
+    const int inflate_r = params_.obstacle_inflate;
+
+    for (auto& [wx, wy] : map_points) {
+        int gx, gy;
+        if (!WorldToGrid(wx, wy, gx, gy)) continue;
+
+        // 跳过已在静态代价地图中的障碍物(墙壁等静态地图元素)
+        // 只把真正新出现的障碍(人、移动物体)注入 dynamic_cells_
+        int center_k = gy * map_width_ + gx;
+        if (center_k >= 0 && center_k < static_cast<int>(costmap_.size())
+            && costmap_[center_k] == 255) {
+            continue;
+        }
+
+        for (int dy = -inflate_r; dy <= inflate_r; ++dy) {
+            for (int dx = -inflate_r; dx <= inflate_r; ++dx) {
+                int nx = gx + dx;
+                int ny = gy + dy;
+                if (nx < 0 || nx >= map_width_ || ny < 0 || ny >= map_height_) continue;
+                int k = ny * map_width_ + nx;
+                // 只向后延伸过期时间(防止旧记录覆盖新的)
+                auto it = dynamic_cells_.find(k);
+                if (it == dynamic_cells_.end() || it->second < expiry) {
+                    dynamic_cells_[k] = expiry;
+                }
+            }
+        }
+    }
+}
+
+void AStarPlanner::ClearExpiredObstacles(rclcpp::Time now) {
+    std::lock_guard<std::mutex> lk(map_mutex_);
+    for (auto it = dynamic_cells_.begin(); it != dynamic_cells_.end(); ) {
+        if (it->second < now) {
+            it = dynamic_cells_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+bool AStarPlanner::IsPathBlocked(const std::vector<Waypoint>& path,
+                                  const Pose2D& robot,
+                                  double lookahead_dist) const
+{
+    if (!has_map_ || path.empty()) return false;
+    std::lock_guard<std::mutex> lk(map_mutex_);
+    if (dynamic_cells_.empty()) return false;
+
+    // 找最近路径点下标
+    size_t nearest = 0;
+    double min_d = std::numeric_limits<double>::max();
+    for (size_t i = 0; i < path.size(); ++i) {
+        double d = std::hypot(path[i].x - robot.x, path[i].y - robot.y);
+        if (d < min_d) { min_d = d; nearest = i; }
+    }
+
+    // 检查从最近点向前 lookahead_dist 范围内的路径点
+    for (size_t i = nearest; i < path.size(); ++i) {
+        double dist = std::hypot(path[i].x - robot.x, path[i].y - robot.y);
+        if (dist > lookahead_dist) break;
+
+        int gx, gy;
+        if (!WorldToGrid(path[i].x, path[i].y, gx, gy)) continue;
+        int k = gy * map_width_ + gx;
+        if (dynamic_cells_.count(k)) return true;
+    }
+    return false;
 }
 
 }  // namespace slam_nav

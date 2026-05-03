@@ -126,6 +126,11 @@ SlamNavNode::SlamNavNode(const rclcpp::NodeOptions& options)
             }
         });
 
+    // Livox 点云 (动态障碍物检测)
+    livox_sub_ = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(
+        lidar_topic_, rclcpp::SensorDataQoS(),
+        std::bind(&SlamNavNode::LivoxCallback, this, std::placeholders::_1));
+
     // ---- 发布 ----
     path_pub_           = this->create_publisher<nav_msgs::msg::Path>("/planned_path", 10);
     status_pub_         = this->create_publisher<std_msgs::msg::String>("/nav_status", 10);
@@ -136,6 +141,8 @@ SlamNavNode::SlamNavNode(const rclcpp::NodeOptions& options)
     robot_enable_pub_   = this->create_publisher<std_msgs::msg::Bool>("/robot_enable", 10);
     actual_trajectory_pub_ = this->create_publisher<nav_msgs::msg::Path>("/actual_trajectory", 10);
     goal_marker_pub_    = this->create_publisher<visualization_msgs::msg::Marker>("/goal_marker", 10);
+    obstacle_pts_pub_   = this->create_publisher<visualization_msgs::msg::Marker>("/obstacle_points", 10);
+    detour_wp_pub_      = this->create_publisher<visualization_msgs::msg::Marker>("/detour_waypoint", 10);
     costmap_pub_         = this->create_publisher<nav_msgs::msg::OccupancyGrid>(
         "/inflated_costmap", rclcpp::QoS(1).transient_local().reliable());
 
@@ -158,6 +165,7 @@ SlamNavNode::SlamNavNode(const rclcpp::NodeOptions& options)
             PublishActualTrajectory();
             PublishPath();
             PublishGoalMarker();
+            PublishObstacleMarkers();
         });
 
     RCLCPP_INFO(this->get_logger(), "SlamNavNode 初始化完成");
@@ -261,6 +269,7 @@ void SlamNavNode::DeclareAndLoadParams() {
     this->declare_parameter<double>("tracking.cte_kp", tp.cte_kp);
     this->declare_parameter<double>("tracking.cmd_filter_alpha", tp.cmd_filter_alpha);
     this->declare_parameter<double>("tracking.heading_align_threshold", 30.0);  // 度
+    this->declare_parameter<double>("tracking.max_accel", tp.max_accel);
     tp.lookahead_distance   = this->get_parameter("tracking.lookahead_distance").as_double();
     tp.min_lookahead        = this->get_parameter("tracking.min_lookahead").as_double();
     tp.max_lookahead        = this->get_parameter("tracking.max_lookahead").as_double();
@@ -274,6 +283,8 @@ void SlamNavNode::DeclareAndLoadParams() {
     tp.cte_kp               = this->get_parameter("tracking.cte_kp").as_double();
     tp.cmd_filter_alpha     = this->get_parameter("tracking.cmd_filter_alpha").as_double();
     tp.heading_align_threshold = this->get_parameter("tracking.heading_align_threshold").as_double() * M_PI / 180.0;  // 度→弧度
+    tp.max_accel            = this->get_parameter("tracking.max_accel").as_double();
+    tp.control_dt           = (control_rate_ > 0.0) ? (1.0 / control_rate_) : 0.05;
     tracker_.SetParams(tp);
 
     // -- SDK 接口参数 --
@@ -289,6 +300,36 @@ void SlamNavNode::DeclareAndLoadParams() {
     sp.default_mode  = static_cast<int8_t>(this->get_parameter("sdk.default_mode").as_int());
     sp.enable_posture = this->get_parameter("sdk.enable_posture_fields").as_bool();
     sdk_interface_.SetParams(sp);
+
+    // -- 动态避障参数 --
+    this->declare_parameter<std::string>("obstacle.lidar_topic", "/livox/lidar");
+    this->declare_parameter<std::string>("obstacle.lidar_frame", "livox_frame");
+    this->declare_parameter<double>("obstacle.z_min", 0.15);
+    this->declare_parameter<double>("obstacle.z_max", 2.0);
+    this->declare_parameter<double>("obstacle.fov_half_deg", 90.0);
+    this->declare_parameter<double>("obstacle.dynamic_ttl", 3.0);
+    this->declare_parameter<double>("obstacle.replan_lookahead", 3.0);
+    this->declare_parameter<double>("obstacle.replan_cooldown", 2.0);
+    this->declare_parameter<int>("obstacle.lidar_subsample", 5);
+    this->declare_parameter<bool>("obstacle.enable", true);
+    this->declare_parameter<double>("obstacle.corridor_width", 0.6);
+    this->declare_parameter<bool>("obstacle.gps_avoidance", false);
+    this->declare_parameter<double>("obstacle.detour_lateral", 1.5);
+    this->declare_parameter<double>("obstacle.detour_forward", 1.5);
+    lidar_topic_          = this->get_parameter("obstacle.lidar_topic").as_string();
+    lidar_frame_          = this->get_parameter("obstacle.lidar_frame").as_string();
+    obstacle_z_min_       = this->get_parameter("obstacle.z_min").as_double();
+    obstacle_z_max_       = this->get_parameter("obstacle.z_max").as_double();
+    obstacle_fov_half_deg_= this->get_parameter("obstacle.fov_half_deg").as_double();
+    dynamic_ttl_          = this->get_parameter("obstacle.dynamic_ttl").as_double();
+    replan_lookahead_     = this->get_parameter("obstacle.replan_lookahead").as_double();
+    replan_cooldown_      = this->get_parameter("obstacle.replan_cooldown").as_double();
+    lidar_subsample_      = this->get_parameter("obstacle.lidar_subsample").as_int();
+    obstacle_corridor_width_ = this->get_parameter("obstacle.corridor_width").as_double();
+    gps_avoidance_    = this->get_parameter("obstacle.gps_avoidance").as_bool();
+    detour_lateral_   = this->get_parameter("obstacle.detour_lateral").as_double();
+    detour_forward_   = this->get_parameter("obstacle.detour_forward").as_double();
+    obstacle_avoidance_enabled_ = this->get_parameter("obstacle.enable").as_bool();
 
     RCLCPP_INFO(this->get_logger(), "参数加载完成: mode=%s odom=%s rate=%.0fHz",
                 nav_mode_.c_str(), localization_odom_topic_.c_str(), control_rate_);
@@ -323,6 +364,9 @@ void SlamNavNode::SwitchLocalizationSource(const std::string& topic, bool gps_mo
         nav_mode_  = gps_mode ? "gps" : "slam";
         if (gps_mode_) {
             use_astar_ = false;
+            // GPS 模式下必须禁用 TF 位姿, 否则 ControlLoop 会用 SLAM map 坐标覆盖
+            // current_pose_, 导致 PublishStatus 反算出错误的经纬度
+            use_tf_pose_ = false;
         } else {
             // 切回 SLAM 模式时, 从参数恢复 use_astar (避免室内永远直线规划撞墙)
             use_astar_ = this->get_parameter("planning.use_astar").as_bool();
@@ -453,6 +497,76 @@ void SlamNavNode::InitialPoseCallback(
                 current_pose_.yaw * kRadToDeg);
 }
 
+// ==================== 动态障碍物检测 ====================
+
+void SlamNavNode::LivoxCallback(
+    const livox_ros_driver2::msg::CustomMsg::SharedPtr msg)
+{
+    if (!obstacle_avoidance_enabled_) return;
+
+    // 获取 livox_frame → map 的 TF 变换
+    geometry_msgs::msg::TransformStamped tf_stamped;
+    try {
+        tf_stamped = tf_buffer_->lookupTransform(
+            map_frame_, lidar_frame_, tf2::TimePointZero);
+    } catch (const tf2::TransformException& ex) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
+            "[动态避障] TF 查询失败 (%s→%s): %s",
+            lidar_frame_.c_str(), map_frame_.c_str(), ex.what());
+        return;
+    }
+
+    // 提取旋转矩阵 (四元数 → 3x3)
+    const double qw = tf_stamped.transform.rotation.w;
+    const double qx = tf_stamped.transform.rotation.x;
+    const double qy = tf_stamped.transform.rotation.y;
+    const double qz = tf_stamped.transform.rotation.z;
+    const double tx = tf_stamped.transform.translation.x;
+    const double ty = tf_stamped.transform.translation.y;
+
+    const double r00 = 1 - 2*(qy*qy + qz*qz), r01 = 2*(qx*qy - qw*qz), r02 = 2*(qx*qz + qw*qy);
+    const double r10 = 2*(qx*qy + qw*qz),     r11 = 1 - 2*(qx*qx + qz*qz), r12 = 2*(qy*qz - qw*qx);
+
+    const double fov_half_rad = obstacle_fov_half_deg_ * M_PI / 180.0;
+
+    std::vector<std::pair<double, double>> map_pts;
+    map_pts.reserve(msg->point_num / lidar_subsample_ + 1);
+
+    int idx = 0;
+    for (const auto& pt : msg->points) {
+        // 前向 FOV 过滤: 只保留雷达坐标系前方 ±fov_half 范围内的点
+        if (std::abs(std::atan2(pt.y, pt.x)) > fov_half_rad) continue;
+
+        // 自身点云过滤: X <= 0.15m 的点属于机器人本体
+        if (pt.x <= 0.15f) continue;
+
+        // 高度过滤 (雷达坐标系): Z <= z_min 为地面, Z > z_max 为天花板/无关物体
+        if (pt.z <= static_cast<float>(obstacle_z_min_) || pt.z > static_cast<float>(obstacle_z_max_)) continue;
+
+        // 降采样
+        if ((idx++ % lidar_subsample_) != 0) continue;
+
+        // 变换到 map 坐标系
+        const double wx = r00*pt.x + r01*pt.y + r02*pt.z + tx;
+        const double wy = r10*pt.x + r11*pt.y + r12*pt.z + ty;
+
+        map_pts.emplace_back(wx, wy);
+    }
+
+    // 始终将过滤后的点存入 raw 列表 (全模式共用)
+    {
+        std::lock_guard<std::mutex> lk(data_mutex_);
+        raw_obstacle_pts_ = map_pts;
+        raw_obstacle_time_ = this->now();
+    }
+
+    // 仅在室内 A* 模式且有地图时才需要注入网格
+    if (use_astar_ && astar_planner_.HasMap() && !map_pts.empty()) {
+        astar_planner_.UpdateDynamicObstacles(map_pts, this->now(), dynamic_ttl_);
+        astar_planner_.ClearExpiredObstacles(this->now());
+    }
+}
+
 // ==================== 多航点 (本地坐标) ====================
 
 void SlamNavNode::NavWaypointsCallback(
@@ -578,7 +692,93 @@ void SlamNavNode::NavWaypointsCallback(
     }
 }
 
+// ==================== 动态避障辅助 (GPS 模式) ====================
+
+bool SlamNavNode::IsRawPathBlocked(const std::vector<Waypoint>& path,
+                                   const Pose2D& robot,
+                                   double lookahead_dist) const
+{
+    if (raw_obstacle_pts_.empty() || path.empty()) return false;
+
+    // 找最近路径点
+    size_t nearest = 0;
+    double min_d = std::numeric_limits<double>::max();
+    for (size_t i = 0; i < path.size(); ++i) {
+        double d = std::hypot(path[i].x - robot.x, path[i].y - robot.y);
+        if (d < min_d) { min_d = d; nearest = i; }
+    }
+
+    const double half_w = obstacle_corridor_width_;
+
+    // 检查前方 lookahead_dist 范围内各路径点是否被障碍点侵入廊道
+    for (size_t i = nearest; i < path.size(); ++i) {
+        if (std::hypot(path[i].x - robot.x, path[i].y - robot.y) > lookahead_dist) break;
+        for (const auto& [ox, oy] : raw_obstacle_pts_) {
+            double d = std::hypot(ox - path[i].x, oy - path[i].y);
+            if (d < half_w) return true;
+        }
+    }
+    return false;
+}
+
 // ==================== TF 位姿获取 ====================
+
+Pose2D SlamNavNode::ComputeGpsDetourWaypoint(
+    const std::vector<Waypoint>& path, const Pose2D& robot) const
+{
+    // 找最近路径点
+    size_t nearest = 0;
+    double min_d = std::numeric_limits<double>::max();
+    for (size_t i = 0; i < path.size(); ++i) {
+        double d = std::hypot(path[i].x - robot.x, path[i].y - robot.y);
+        if (d < min_d) { min_d = d; nearest = i; }
+    }
+
+    // 沿路径向前走 detour_forward_ 找目标参考点
+    size_t ref_i = nearest;
+    double acc = 0.0;
+    for (size_t i = nearest + 1; i < path.size(); ++i) {
+        acc += std::hypot(path[i].x - path[i-1].x, path[i].y - path[i-1].y);
+        ref_i = i;
+        if (acc >= detour_forward_) break;
+    }
+
+    // 路径方向 (单位向量)
+    double dir_x = 1.0, dir_y = 0.0;
+    if (ref_i > 0) {
+        double dx = path[ref_i].x - path[ref_i - 1].x;
+        double dy = path[ref_i].y - path[ref_i - 1].y;
+        double len = std::hypot(dx, dy);
+        if (len > 1e-6) { dir_x = dx / len; dir_y = dy / len; }
+    }
+
+    // 左侧垂直方向 (+90°)
+    const double left_x = -dir_y, left_y = dir_x;
+
+    // 参考点世界坐标
+    const double cx = path[ref_i].x;
+    const double cy = path[ref_i].y;
+
+    // 统计左/右各 kCheckRadius 内的障碍点数
+    constexpr double kCheckRadius = 4.0;
+    int left_cnt = 0, right_cnt = 0;
+    for (const auto& [ox, oy] : raw_obstacle_pts_) {
+        if (std::hypot(ox - cx, oy - cy) > kCheckRadius) continue;
+        double side = (ox - cx) * left_x + (oy - cy) * left_y;
+        if (side >= 0.0) left_cnt++;
+        else             right_cnt++;
+    }
+
+    // 选障碍更少的一侧
+    const double lat_sign = (left_cnt <= right_cnt) ? 1.0 : -1.0;
+
+    Pose2D detour;
+    detour.x   = cx + lat_sign * left_x * detour_lateral_;
+    detour.y   = cy + lat_sign * left_y * detour_lateral_;
+    detour.yaw = std::atan2(dir_y, dir_x);
+    detour.yaw_specified = false;
+    return detour;
+}
 
 bool SlamNavNode::GetPoseFromTF(Pose2D& pose) {
     try {
@@ -636,6 +836,10 @@ void SlamNavNode::ControlLoop() {
 
             bool ok = false;
             if (use_astar_ && astar_planner_.HasMap()) {
+                // 保存规划前的旧路径, 供重规划失败时的停车等待使用
+                std::vector<Waypoint> prev_path = astar_planner_.HasValidPath()
+                    ? astar_planner_.GetPath() : std::vector<Waypoint>{};
+
                 // A* 避障规划
                 if (multi_nav_active_ && waypoint_queue_.size() > 1) {
                     ok = astar_planner_.PlanMulti(current_pose_, waypoint_queue_);
@@ -656,6 +860,10 @@ void SlamNavNode::ControlLoop() {
                                 astar_planner_.GetPath().size());
                 } else {
                     ok = false;
+                    // 恢复旧路径供 TRACKING 的 IsPathBlocked 检测使用
+                    if (!prev_path.empty()) {
+                        astar_planner_.RestorePath(prev_path);
+                    }
                 }
             }
 
@@ -681,10 +889,14 @@ void SlamNavNode::ControlLoop() {
                         RCLCPP_ERROR(this->get_logger(), "直线路径规划失败");
                     }
                 } else {
-                    // A* 规划失败, 室内环境禁止直线规划(会撞墙)
-                    state_machine_.HandleEvent(NavEvent::PLAN_FAILED);
-                    RCLCPP_ERROR(this->get_logger(),
-                        "A* 路径规划失败 (目标可能不可达), 已取消导航");
+                    // A* 重规划失败: 可能是动态障碍物临时堵塞通道
+                    // 不直接取消导航, 而是回退到 TRACKING 状态停车等待;
+                    // 冷却时间结束后 IsPathBlocked 会再次触发重规划
+                    RCLCPP_WARN(this->get_logger(),
+                        "A* 重规划失败 (通道可能被障碍物临时堵塞), 停车等待障碍移开...");
+                    // 旧路径已在上方 RestorePath 恢复, TRACKING 里 IsPathBlocked
+                    // 会检测到堵塞并继续停车, 冷却到期后再次触发重规划
+                    state_machine_.HandleEvent(NavEvent::PLAN_SUCCESS);
                 }
             }
             break;
@@ -694,6 +906,65 @@ void SlamNavNode::ControlLoop() {
             if (nav_paused_) {
                 PublishStopCmd();
                 return;
+            }
+
+            // 动态避障: 检查前方路径是否被堵塞
+            if (obstacle_avoidance_enabled_) {
+                const std::vector<Waypoint>& cur_path =
+                    astar_planner_.HasValidPath() ? astar_planner_.GetPath() : planner_.GetPath();
+
+                if (use_astar_ && astar_planner_.HasMap()) {
+                    // 室内 A* 模式: 基于网格检测 → 重规划绕行
+                    if (astar_planner_.IsPathBlocked(cur_path, current_pose_, replan_lookahead_)) {
+                        double elapsed = (this->now() - last_replan_time_).seconds();
+                        if (elapsed > replan_cooldown_) {
+                            last_replan_time_ = this->now();
+                            RCLCPP_INFO(this->get_logger(),
+                                "[动态避障] 前方路径被堵塞, 触发重规划");
+                            state_machine_.HandleEvent(NavEvent::GOAL_RECEIVED);
+                        } else {
+                            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                                "[动态避障] 前方路径被堵塞, 冷却等待中...");
+                        }
+                        // 无论是否触发重规划, 路径被堵时必须停车
+                        PublishStopCmd();
+                        return;
+                    }
+                } else {
+                    // 室外 GPS 模式: 基于原始点列检测廈道
+                    double raw_age = (this->now() - raw_obstacle_time_).seconds();
+                    if (raw_age < dynamic_ttl_ && IsRawPathBlocked(cur_path, current_pose_, replan_lookahead_)) {
+                        double elapsed = (this->now() - last_replan_time_).seconds();
+                        if (elapsed > replan_cooldown_) {
+                            last_replan_time_ = this->now();
+                            if (gps_avoidance_ && goal_pose_.has_value()) {
+                                // 绕行模式: 计算绕路点 → 重规划
+                                Pose2D detour = ComputeGpsDetourWaypoint(cur_path, current_pose_);
+                                waypoint_queue_ = {detour, goal_pose_.value()};
+                                multi_nav_active_ = true;
+                                waypoint_index_   = 0;
+                                RCLCPP_INFO(this->get_logger(),
+                                    "[动态避障-GPS] 已计算绕路点 (%.2f, %.2f), 触发重规划",
+                                    detour.x, detour.y);
+                                state_machine_.HandleEvent(NavEvent::GOAL_RECEIVED);
+                                PublishStopCmd();
+                                return;
+                            } else {
+                                // 停车等待模式
+                                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                                    "[动态避障-GPS] 前方路径被堵塞, 停车等待障碍移开...");
+                            }
+                        } else if (!gps_avoidance_) {
+                            // 停车等待模式下持续停车
+                            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                                "[动态避障-GPS] 前方路径被堵塞, 停车等待障碍移开...");
+                        }
+                        if (!gps_avoidance_) {
+                            PublishStopCmd();
+                            return;
+                        }
+                    }
+                }
             }
             OmniControlCmd cmd;
             bool tracking = tracker_.ComputeControl(current_pose_, cmd);
@@ -897,6 +1168,115 @@ void SlamNavNode::PublishActualTrajectory() {
 
     actual_trajectory_.header.stamp = this->now();
     actual_trajectory_pub_->publish(actual_trajectory_);
+}
+
+void SlamNavNode::PublishObstacleMarkers() {
+    auto now = this->now();
+
+    // ---- 障碍点 (POINTS Marker) ----
+    {
+        visualization_msgs::msg::Marker m;
+        m.header.stamp    = now;
+        m.header.frame_id = map_frame_;
+        m.ns              = "obstacle_pts";
+        m.id              = 0;
+        m.type            = visualization_msgs::msg::Marker::POINTS;
+        m.action          = visualization_msgs::msg::Marker::ADD;
+        m.scale.x = 0.15;
+        m.scale.y = 0.15;
+        m.color.r = 1.0f; m.color.g = 0.3f; m.color.b = 0.0f; m.color.a = 0.9f;
+        // TTL: 数据超过 dynamic_ttl_ 秒则清空
+        double age;
+        std::vector<std::pair<double,double>> pts;
+        {
+            std::lock_guard<std::mutex> lk(data_mutex_);
+            age = (now - raw_obstacle_time_).seconds();
+            pts = raw_obstacle_pts_;
+        }
+        if (age < dynamic_ttl_ && !pts.empty()) {
+            for (auto& [ox, oy] : pts) {
+                geometry_msgs::msg::Point p;
+                p.x = ox; p.y = oy; p.z = 0.2;
+                m.points.push_back(p);
+            }
+        }
+        obstacle_pts_pub_->publish(m);
+    }
+
+    // ---- 重规划触发点 (SPHERE Marker) ----
+    // GPS 模式: 青色球 = 绕路中间航点 (multi_nav_active_ 为真时)
+    // A*  模式: 红色球 = 当前路径上离障碍最近的路径点 (有障碍且在预视范围内时)
+    {
+        visualization_msgs::msg::Marker m;
+        m.header.stamp    = now;
+        m.header.frame_id = map_frame_;
+        m.ns              = "detour_wp";
+        m.id              = 0;
+        m.type            = visualization_msgs::msg::Marker::SPHERE;
+        m.scale.x = 0.5; m.scale.y = 0.5; m.scale.z = 0.5;
+
+        bool show = false;
+        double sx = 0, sy = 0;
+        float cr = 1.0f, cg = 0.0f, cb = 0.0f;  // 默认红色(A*堵塞点)
+
+        double raw_age;
+        std::vector<std::pair<double,double>> pts;
+        bool multi_active = false;
+        double dw_x = 0, dw_y = 0;
+        {
+            std::lock_guard<std::mutex> lk(data_mutex_);
+            raw_age = (now - raw_obstacle_time_).seconds();
+            pts = raw_obstacle_pts_;
+            if (multi_nav_active_ && waypoint_queue_.size() >= 2) {
+                multi_active = true;
+                dw_x = waypoint_queue_[0].x;
+                dw_y = waypoint_queue_[0].y;
+            }
+        }
+
+        if (multi_active) {
+            // GPS 模式: 青色球 = 当前绕路中间点
+            sx = dw_x; sy = dw_y;
+            cr = 0.0f; cg = 1.0f; cb = 1.0f;
+            show = true;
+        } else if (use_astar_ && raw_age < dynamic_ttl_ && !pts.empty()) {
+            // A* 模式: 在路径点中找离任意障碍最近的一点
+            const std::vector<Waypoint>* path_ptr = nullptr;
+            if (astar_planner_.HasValidPath()) {
+                path_ptr = &astar_planner_.GetPath();
+            } else if (planner_.HasValidPath()) {
+                path_ptr = &planner_.GetPath();
+            }
+            if (path_ptr && !path_ptr->empty()) {
+                double min_d = std::numeric_limits<double>::max();
+                for (const auto& wp : *path_ptr) {
+                    for (const auto& [ox, oy] : pts) {
+                        double d = std::hypot(ox - wp.x, oy - wp.y);
+                        if (d < min_d) {
+                            min_d = d;
+                            sx = ox; sy = oy;
+                        }
+                    }
+                }
+                // 只有障碍点落在预视距离内才显示
+                if (min_d < replan_lookahead_) {
+                    show = true;
+                }
+            }
+        }
+
+        if (show) {
+            m.action = visualization_msgs::msg::Marker::ADD;
+            m.pose.position.x = sx;
+            m.pose.position.y = sy;
+            m.pose.position.z = 0.5;
+            m.pose.orientation.w = 1.0;
+            m.color.r = cr; m.color.g = cg; m.color.b = cb; m.color.a = 0.9f;
+        } else {
+            m.action = visualization_msgs::msg::Marker::DELETE;
+        }
+        detour_wp_pub_->publish(m);
+    }
 }
 
 void SlamNavNode::PublishGoalMarker() {

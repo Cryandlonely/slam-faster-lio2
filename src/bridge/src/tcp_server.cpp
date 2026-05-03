@@ -70,7 +70,7 @@ void TcpServer::stop() {
         accept_thread_.join();
     }
 
-    // 关闭所有客户端
+    // 关闭所有客户端 (fd 关闭后 clientLoop 的 poll 会返回 POLLHUP, 线程自然退出)
     {
         std::lock_guard<std::mutex> lock(clients_mutex_);
         for (int fd : client_fds_) {
@@ -79,11 +79,7 @@ void TcpServer::stop() {
         }
         client_fds_.clear();
     }
-
-    for (auto& t : client_threads_) {
-        if (t.joinable()) t.join();
-    }
-    client_threads_.clear();
+    // client 线程已 detach, 无需 join
 }
 
 void TcpServer::broadcast(const std::string& msg) {
@@ -140,11 +136,11 @@ void TcpServer::acceptLoop() {
                 continue;
             }
 
-            char ip_str[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, sizeof(ip_str));
-            std::cout << "[TcpServer] 客户端连接: " << ip_str
-                      << ":" << ntohs(client_addr.sin_port)
-                      << " (fd=" << client_fd << ")\n";
+            {
+                char ip_str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, sizeof(ip_str));
+                (void)ip_str;  // suppress unused warning
+            }
 
             {
                 std::lock_guard<std::mutex> lock(clients_mutex_);
@@ -157,8 +153,8 @@ void TcpServer::acceptLoop() {
                 if (conn_cb_) conn_cb_(client_fd, true);
             }
 
-            // 每客户端一线程处理接收
-            client_threads_.emplace_back(&TcpServer::clientLoop, this, client_fd);
+            // 每客户端一线程处理接收; 使用 detach 避免 client_threads_ 无限增长
+            std::thread(&TcpServer::clientLoop, this, client_fd).detach();
         }
     }
 }
@@ -222,7 +218,6 @@ void TcpServer::clientLoop(int client_fd) {
 
     removeClient(client_fd);
     ::close(client_fd);
-    std::cout << "[TcpServer] 客户端断开 (fd=" << client_fd << ")\n";
 }
 
 void TcpServer::removeClient(int client_fd) {

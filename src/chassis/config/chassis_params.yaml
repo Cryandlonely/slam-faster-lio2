@@ -3,7 +3,7 @@ chassis_node:
   ros__parameters:
     # 串口设备路径 (STM32 UART, 115200 8N1)
     # 可通过 ls /dev/ttyUSB* 或 ls /dev/ttyACM* 查看
-    serial_port: "/dev/ttyUSB0"
+    serial_port: "/dev/ttyUSB1"
 
     # 速度限幅 (对应 /cmd_vel 中 m/s 和 rad/s 的上限)
     max_vx: 2.0       # 最大前进速度 (m/s)

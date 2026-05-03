@@ -1,0 +1,179 @@
+Panels:
+  - Class: rviz_common/Displays
+    Help Height: 0
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /Path1
+        - /Path2
+        - /Marker1
+        - /Marker2
+        - /Marker3
+      Splitter Ratio: 0.5
+    Tree Height: 800
+  - Class: rviz_common/Selection
+    Name: Selection
+  - Class: rviz_common/Tool Properties
+    Name: Tool Properties
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 1
+      Background Color: 48; 48; 48
+      Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 1
+      Color: 160; 160; 164
+      Plane: XY
+      Plane Cell Count: 100
+      Reference Frame: <Fixed Frame>
+
+    # ---- 规划路径 (绿色) ----
+    - Class: rviz_default_plugins/Path
+      Enabled: true
+      Name: Path
+      Topic:
+        Depth: 10
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /planned_path
+      Color: 0; 255; 0
+      Line Style: Lines
+      Line Width: 0.05
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0.05
+      Pose Color: 255; 85; 255
+      Pose Style: None
+      Frame: <Fixed Frame>
+
+    # ---- 实际轨迹 (黄色) ----
+    - Class: rviz_default_plugins/Path
+      Enabled: true
+      Name: Actual Trajectory
+      Topic:
+        Depth: 10
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /actual_trajectory
+      Color: 255; 220; 0
+      Line Style: Lines
+      Line Width: 0.03
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0.05
+      Pose Style: None
+      Frame: <Fixed Frame>
+
+    # ---- 车辆当前位置 (PoseStamped 箭头) ----
+    - Class: rviz_default_plugins/Pose
+      Enabled: true
+      Name: Robot Pose
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /current_pose
+      Arrow Length: 0.8
+      Color: 255; 85; 0
+      Head Length: 0.3
+      Head Radius: 0.15
+      Shaft Length: 0.5
+      Shaft Radius: 0.07
+      Axes Length: 0.3
+      Axes Radius: 0.03
+      Shape: Arrow
+      Frame: <Fixed Frame>
+
+    # ---- 目标点 Marker ----
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: Goal Marker
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /goal_marker
+      Queue Size: 5
+      Frame: <Fixed Frame>
+
+    # ---- 动态障碍点 Marker (橙色点阵) ----
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: Obstacle Points
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /obstacle_points
+      Queue Size: 5
+      Frame: <Fixed Frame>
+
+    # ---- 绕路点 Marker (青色球) ----
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: Blocked/Detour Point
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /detour_waypoint
+      Queue Size: 5
+      Frame: <Fixed Frame>
+
+    # ---- 原始点云 (调试用) ----
+    - Class: rviz_default_plugins/PointCloud2
+      Enabled: false
+      Name: LiDAR Raw
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /livox/lidar
+      Size (Pixels): 2
+      Color Transformer: FlatColor
+      Color: 100; 200; 255
+      Frame: <Fixed Frame>
+
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.06
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.01
+      Scale: 40
+      Target Frame: <Fixed Frame>
+      Value: TopDownOrtho (rviz_default_plugins)
+      X: 0
+      Y: 0
+    Saved: ~

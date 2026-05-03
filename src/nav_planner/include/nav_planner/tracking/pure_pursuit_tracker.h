@@ -25,6 +25,8 @@ struct TrackerParams {
     double cte_kp               = 1.0;   // 横向纠偏增益
     double cmd_filter_alpha     = 0.3;   // 指令低通滤波系数
     double heading_align_threshold = 0.524; // 航向对齐阈值 (rad)。配置文件输入度数，slam_nav_node 踏入时自动换算为弧度
+    double max_accel            = 1.0;   // 最大线加速度 (m/s²), 限制起步/转弯时的速度突变; <=0 禁用
+    double control_dt           = 0.05;  // 控制周期 (s), 由 control.rate 决定
 };
 
 /// Pure Pursuit 轨迹跟踪器 (万向轮底盘适配)

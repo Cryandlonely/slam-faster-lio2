@@ -578,34 +578,35 @@ void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Share
             pcl_wait_save->clear();
             scan_wait_num = 0;
         }
+    }
 
-        // 实时导出当前地图点云(固定文件名覆盖), 便于遥控端读取
-        if (pcl_wait_save->size() > 0 && realtime_trans_save_en && realtime_trans_save_interval_sec > 0.0)
+    // 实时导出当前地图点云(固定文件名覆盖), 便于遥控端读取
+    // 注意: 独立于 pcd_save_en, 数据源为 pcl_wait_pub (map_en=true 时持续积累)
+    if (pcl_wait_pub->size() > 0 && realtime_trans_save_en && realtime_trans_save_interval_sec > 0.0)
+    {
+        static double last_trans_save_time = -1.0;
+        if (last_trans_save_time < 0.0 ||
+            (lidar_end_time - last_trans_save_time) >= realtime_trans_save_interval_sec)
         {
-            static double last_trans_save_time = -1.0;
-            if (last_trans_save_time < 0.0 ||
-                (lidar_end_time - last_trans_save_time) >= realtime_trans_save_interval_sec)
-            {
-                EnsureRelativeParentDirs(string(ROOT_DIR), realtime_trans_rel_path);
-                string trans_points_dir = string(ROOT_DIR) + realtime_trans_rel_path;
-                string trans_points_tmp  = trans_points_dir + ".tmp";
-                pcl::PCDWriter pcd_writer;
-                // 先体素降采样再写临时文件, 最后原子rename避免竞态
-                if (realtime_trans_voxel_size > 0.0) {
-                    PointCloudXYZI::Ptr cloud_ds(new PointCloudXYZI());
-                    pcl::VoxelGrid<PointType> vg;
-                    vg.setInputCloud(pcl_wait_save);
-                    vg.setLeafSize(realtime_trans_voxel_size,
-                                   realtime_trans_voxel_size,
-                                   realtime_trans_voxel_size);
-                    vg.filter(*cloud_ds);
-                    pcd_writer.writeBinary(trans_points_tmp, *cloud_ds);
-                } else {
-                    pcd_writer.writeBinary(trans_points_tmp, *pcl_wait_save);
-                }
-                rename(trans_points_tmp.c_str(), trans_points_dir.c_str());
-                last_trans_save_time = lidar_end_time;
+            EnsureRelativeParentDirs(string(ROOT_DIR), realtime_trans_rel_path);
+            string trans_points_dir = string(ROOT_DIR) + realtime_trans_rel_path;
+            string trans_points_tmp  = trans_points_dir + ".tmp";
+            pcl::PCDWriter pcd_writer;
+            // 先体素降采样再写临时文件, 最后原子rename避免竞态
+            if (realtime_trans_voxel_size > 0.0) {
+                PointCloudXYZI::Ptr cloud_ds(new PointCloudXYZI());
+                pcl::VoxelGrid<PointType> vg;
+                vg.setInputCloud(pcl_wait_pub);
+                vg.setLeafSize(realtime_trans_voxel_size,
+                               realtime_trans_voxel_size,
+                               realtime_trans_voxel_size);
+                vg.filter(*cloud_ds);
+                pcd_writer.writeBinary(trans_points_tmp, *cloud_ds);
+            } else {
+                pcd_writer.writeBinary(trans_points_tmp, *pcl_wait_pub);
             }
+            rename(trans_points_tmp.c_str(), trans_points_dir.c_str());
+            last_trans_save_time = lidar_end_time;
         }
     }
 }
@@ -1190,17 +1191,9 @@ private:
     void map_save_callback(  const std::shared_ptr<rmw_request_id_t> request_header, const std::shared_ptr<std_srvs::srv::Trigger::Request> req, const std::shared_ptr<std_srvs::srv::Trigger::Response> res)
     {
         RCLCPP_INFO(this->get_logger(), "Saving map to %s...", map_file_path.c_str());
-        if (pcd_save_en)
-        {
-            save_to_pcd();
-            res->success = true;
-            res->message = "Map saved.";
-        }
-        else
-        {
-            res->success = false;
-            res->message = "Map save disabled.";
-        }
+        save_to_pcd();
+        res->success = true;
+        res->message = "Map saved.";
     }
 
 private:

@@ -42,11 +42,11 @@ def generate_launch_description():
         description='RViz config file path'
     )
     declare_global_search_cmd = DeclareLaunchArgument(
-        'global_search', default_value='true',
+        'global_search', default_value='false',
         description='Enable global search localization (set false to start at map origin)'
     )
 
-    # fast_lio_node (예시로 fastlio_mapping 실행)
+    # fast_lio_node
     fast_lio_node = Node(
         package='location',
         executable='fastlio_mapping',
@@ -56,17 +56,8 @@ def generate_launch_description():
         output='screen'
     )
 
-    # global_localization 노드 추가
-    global_localization_node = Node(
-        package='location',
-        executable='global_localization.py',
-        name='global_localization',
-        parameters=[PathJoinSubstitution([config_path, config_file]),
-                    {'use_sim_time': use_sim_time}],
-        output='screen'
-    )
-
-    # transform_fusion 노드 추가
+    # transform_fusion: 发布 map→camera_init TF 及 /localization 话题
+    # 不依赖 global_localization 时, map_to_odom 修正量为零(单位矩阵), 机器人从地图原点起步
     transform_fusion_node = Node(
         package='location',
         executable='transform_fusion.py',
@@ -75,16 +66,6 @@ def generate_launch_description():
                     {'use_sim_time': use_sim_time}],
         output='screen'
     )
-
-    # global map publisher 노드 추가
-    global_map_publisher_node = Node(
-        package='location',
-        executable='global_map_publisher.py',
-        name='global_map_publisher',
-        parameters=[PathJoinSubstitution([config_path, config_file]),
-                    {'use_sim_time': use_sim_time}],
-        output='screen'
-    )    
 
     rviz_node = Node(
         package='rviz2',
@@ -115,9 +96,7 @@ def generate_launch_description():
     ld.add_action(declare_global_search_cmd)
 
     ld.add_action(fast_lio_node)
-    ld.add_action(global_localization_node)
     ld.add_action(transform_fusion_node)
-    ld.add_action(global_map_publisher_node)
     ld.add_action(rviz_node)
     ld.add_action(initial_pose_node)
 

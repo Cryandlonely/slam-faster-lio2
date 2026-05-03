@@ -7,9 +7,12 @@
 #include "nav_planner/common/types.h"
 
 #include <nav_msgs/msg/occupancy_grid.hpp>
+#include <rclcpp/time.hpp>
 
 #include <cstdint>
 #include <mutex>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace slam_nav {
@@ -54,8 +57,23 @@ public:
     bool HasValidPath() const;
     void ClearPath();
 
+    /// 将旧路径恢复到 path_ (用于重规划失败后继续停车等待)
+    void RestorePath(const std::vector<Waypoint>& saved_path);
+
     /// 获取膨胀后的代价地图 (OccupancyGrid 格式, 用于 RViz 可视化)
     nav_msgs::msg::OccupancyGrid GetInflatedCostmapMsg() const;
+
+    /// 注入动态障碍物 (map 坐标系 2D 点列表, ttl_sec 秒后自动过期)
+    void UpdateDynamicObstacles(const std::vector<std::pair<double,double>>& map_points,
+                                rclcpp::Time now, double ttl_sec);
+
+    /// 清除已过期的动态障碍格子
+    void ClearExpiredObstacles(rclcpp::Time now);
+
+    /// 检查路径前方 lookahead_dist 范围内是否被动态/静态障碍堵塞
+    bool IsPathBlocked(const std::vector<Waypoint>& path,
+                       const Pose2D& robot,
+                       double lookahead_dist) const;
 
     // 栅格坐标
     struct Cell {
@@ -99,6 +117,9 @@ private:
     int map_height_ = 0;
     std::vector<uint8_t> costmap_;   // 膨胀后的代价地图: 0=free, 255=obstacle
     mutable std::mutex map_mutex_;
+
+    // 动态障碍层: grid_idx → 过期时间
+    mutable std::unordered_map<int, rclcpp::Time> dynamic_cells_;
 };
 
 }  // namespace slam_nav

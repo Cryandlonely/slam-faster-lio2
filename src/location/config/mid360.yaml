@@ -64,7 +64,7 @@
             scan_bodyframe_pub_en: true
 
         pcd_save:
-            pcd_save_en: true
+            pcd_save_en: false
             interval: -1
             realtime_trans_save_en: true
             realtime_trans_interval_sec: 1.0

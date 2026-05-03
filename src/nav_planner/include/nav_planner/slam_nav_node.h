@@ -25,6 +25,7 @@
 #include <tf2_ros/buffer.h>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <visualization_msgs/msg/marker.hpp>
+#include <livox_ros_driver2/msg/custom_msg.hpp>
 
 #include "nav_planner/common/types.h"
 #include "nav_planner/planning/astar_planner.h"
@@ -81,6 +82,19 @@ private:
     void InitialPoseCallback(
         const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg);
 
+    /// Livox 点云回调——识别动态障碍并写入代价地图
+    void LivoxCallback(
+        const livox_ros_driver2::msg::CustomMsg::SharedPtr msg);
+
+    /// GPS 模式下使用原始世界坐标点列检查路径廊道
+    bool IsRawPathBlocked(const std::vector<Waypoint>& path,
+                          const Pose2D& robot,
+                          double lookahead_dist) const;
+
+    /// GPS 模式: 计算绕行绕路点 (评估左右两侧障碍数量, 取较少一侧)
+    Pose2D ComputeGpsDetourWaypoint(const std::vector<Waypoint>& path,
+                                   const Pose2D& robot) const;
+
     // ---- 多航点队列管理 ----
     void CancelMultiNav();
 
@@ -100,6 +114,7 @@ private:
     void PublishTF();                 // 广播 map → base_link TF (使用 SLAM 数据)
     void PublishActualTrajectory();   // 累积实际运动轨迹
     void PublishGoalMarker();         // 发布目标点 Marker
+    void PublishObstacleMarkers();    // 发布障碍点(map坐标系) + 绕路点 Marker
 
     // ---- 状态机回调 ----
     void OnStateChange(NavState old_state, NavState new_state);
@@ -122,6 +137,7 @@ private:
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
         initial_pose_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
+    rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr livox_sub_;
 
     // 发布
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr          path_pub_;
@@ -134,6 +150,8 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr          actual_trajectory_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr goal_marker_pub_;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr obstacle_pts_pub_;   // 障碍点云 Marker
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr detour_wp_pub_;      // 绕路点 Marker
 
     // TF
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
@@ -169,6 +187,14 @@ private:
 
     bool   nav_paused_ = false;        // 导航暂停标志
 
+    // 动态避障: 每帧过滤后的障碍物 map 坐标 (全模式共用)
+    std::vector<std::pair<double,double>> raw_obstacle_pts_;
+    rclcpp::Time raw_obstacle_time_{0, 0, RCL_ROS_TIME};
+
+    // 动态避障重规划
+    rclcpp::Time last_replan_time_{0, 0, RCL_ROS_TIME};
+    bool   obstacle_avoidance_enabled_ = true;  // 动态避障开关
+
     // ==================== 参数 ====================
     double control_rate_ = 20.0;       // 控制循环频率 (Hz)
     double status_rate_  = 2.0;        // 状态发布频率 (Hz)
@@ -184,6 +210,21 @@ private:
     std::string base_frame_ = "base_link";           // 机器人坐标系
     std::string map_topic_  = "map";                   // OccupancyGrid 话题
     bool use_astar_ = true;                             // 是否使用 A* 避障规划
+
+    // 动态避障参数
+    std::string lidar_topic_  = "/livox/lidar";  // Livox 点云话题
+    std::string lidar_frame_  = "livox_frame";   // Livox 驱动帧 ID
+    double obstacle_z_min_    = 0.15;    // 点云高度下限(雷达坐标系), m
+    double obstacle_z_max_    = 2.0;     // 点云高度上限, m
+    double obstacle_fov_half_deg_ = 90.0; // 前向半角 FOV (度), 90=前半球
+    double obstacle_corridor_width_ = 0.6; // 路径廈道半宽 (m), GPS模式障碍检测用
+    bool   gps_avoidance_        = false; // GPS模式: true=计算绕路点绕行, false=停车等待
+    double detour_lateral_       = 1.5;   // 绕路点横向偏移 (m)
+    double detour_forward_       = 1.5;   // 绕路点向前偏移 (m)
+    double dynamic_ttl_       = 3.0;     // 动态障碍 TTL (s)
+    double replan_lookahead_  = 3.0;     // 检测预视距离 (m)
+    double replan_cooldown_   = 2.0;     // 重规划冷却时间 (s)
+    int    lidar_subsample_   = 5;       // 点云采样间隔(降低 CPU 占用)
 };
 
 }  // namespace slam_nav

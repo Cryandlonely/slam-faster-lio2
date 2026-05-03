@@ -6,8 +6,6 @@
 #    ./start_nav.sh stop     # 停止全部模块
 # ============================================================
 
-set -e
-
 WS_DIR="$(cd "$(dirname "$0")" && pwd)"
 SETUP_FILE="$WS_DIR/install/setup.bash"
 LOG_DIR="$WS_DIR/nav_logs"
@@ -21,6 +19,25 @@ NC='\033[0m'
 
 # PID 文件
 PID_FILE="$WS_DIR/.nav_pids"
+
+# 自动重启配置
+MAX_RESTARTS=10   # 单个模块最多重启次数, 超过后不再重启
+RESTART_DELAY=3   # 重启前等待秒数, 避免崩溃风暴
+
+# 内存中的模块状态（关联数组）
+declare -A MODULE_PIDS     # name → pid
+declare -A MODULE_CMDS     # name → bash 命令
+declare -A MODULE_RESTARTS # name → 已重启次数
+
+# ============================================================
+#  更新 PID 文件 (供 stop_all 使用)
+# ============================================================
+_update_pid_file() {
+    > "$PID_FILE"
+    for _name in "${!MODULE_PIDS[@]}"; do
+        echo "${MODULE_PIDS[$_name]} $_name" >> "$PID_FILE"
+    done
+}
 
 # ============================================================
 #  停止所有模块
@@ -47,7 +64,22 @@ stop_all() {
 }
 
 # ============================================================
-#  启动单个模块 (后台运行)
+#  内部启动函数: 后台运行并记录到关联数组
+# ============================================================
+_do_start() {
+    local name="$1"
+    local cmd="$2"
+    local logfile="$LOG_DIR/${name}.log"
+
+    mkdir -p "$LOG_DIR"
+    bash -c "source $SETUP_FILE && $cmd" >> "$logfile" 2>&1 &
+    MODULE_PIDS["$name"]=$!
+    MODULE_CMDS["$name"]="$cmd"
+    _update_pid_file
+}
+
+# ============================================================
+#  首次启动单个模块 (带延迟打印)
 # ============================================================
 launch_module() {
     local name="$1"
@@ -59,13 +91,9 @@ launch_module() {
         sleep "$delay"
     fi
 
-    mkdir -p "$LOG_DIR"
-    local logfile="$LOG_DIR/${name}.log"
-
-    echo -e "  启动 ${CYAN}$name${NC} → 日志: $logfile"
-    bash -c "source $SETUP_FILE && $cmd" > "$logfile" 2>&1 &
-    local pid=$!
-    echo "$pid $name" >> "$PID_FILE"
+    echo -e "  启动 ${CYAN}$name${NC} → 日志: $LOG_DIR/${name}.log"
+    MODULE_RESTARTS["$name"]=0
+    _do_start "$name" "$cmd"
 }
 
 # ============================================================
@@ -100,7 +128,7 @@ echo ""
 > "$PID_FILE"
 
 # ---- 1. LiDAR 驱动 ----
-echo -e "${YELLOW}[1/6] LiDAR 驱动${NC}"
+echo -e "${YELLOW}[1/5] LiDAR 驱动${NC}"
 launch_module "livox_driver" "ros2 launch livox_ros_driver2 msg_MID360s_launch.py"
 
 # ---- 2. 地图服务 ----
@@ -130,20 +158,31 @@ echo -e "  停止全部: ${CYAN}./start_nav.sh stop${NC}"
 echo -e "  导航控制: ${CYAN}cd src/bridge/scripts && python3 nav_cmd.py${NC}"
 echo ""
 
-# 等待用户按 Ctrl+C
+# 注册退出信号
 echo -e "${YELLOW}按 Ctrl+C 停止所有模块${NC}"
 trap 'echo ""; stop_all; exit 0' INT TERM
 
-# 监控进程状态
+# ============================================================
+#  监控 + 自动重启循环
+# ============================================================
 while true; do
     sleep 5
-    failed=""
-    while read -r pid name; do
-        if ! kill -0 "$pid" 2>/dev/null; then
-            failed="$failed $name"
+
+    for mod_name in "${!MODULE_PIDS[@]}"; do
+        mod_pid="${MODULE_PIDS[$mod_name]}"
+        if ! kill -0 "$mod_pid" 2>/dev/null; then
+            mod_count="${MODULE_RESTARTS[$mod_name]:-0}"
+            if [[ "$mod_count" -lt "$MAX_RESTARTS" ]]; then
+                MODULE_RESTARTS["$mod_name"]=$((mod_count + 1))
+                echo -e "${YELLOW}[重启 $((mod_count+1))/$MAX_RESTARTS] ${CYAN}${mod_name}${YELLOW} 已退出，${RESTART_DELAY}s 后重启...${NC}"
+                sleep "$RESTART_DELAY"
+                _do_start "$mod_name" "${MODULE_CMDS[$mod_name]}"
+                echo -e "${GREEN}[重启成功] ${mod_name} PID=${MODULE_PIDS[$mod_name]}${NC}"
+            else
+                echo -e "${RED}[放弃重启] ${mod_name} 已达最大重启次数 ($MAX_RESTARTS)，请检查日志: $LOG_DIR/${mod_name}.log${NC}"
+                unset "MODULE_PIDS[$mod_name]"
+                _update_pid_file
+            fi
         fi
-    done < "$PID_FILE"
-    if [[ -n "$failed" ]]; then
-        echo -e "${RED}[警告] 以下模块已退出:${failed}${NC}"
-    fi
+    done
 done

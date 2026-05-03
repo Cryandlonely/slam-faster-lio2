@@ -67,19 +67,19 @@ void GpsLocalizationProvider::SetGpsData(double lat, double lon, double altitude
 void GpsLocalizationProvider::ConvertGpsToLocal(double lat, double lon,
                                                  double& x, double& y) const
 {
-    // 等距圆柱投影（简化版墨卡托）
-    // 在赤道附近精度较高，中高纬度有误差
-    
-    double lat_rad = lat * DEG_TO_RAD;
-    double lon_rad = lon * DEG_TO_RAD;
-    double ref_lat_rad = ref_lat_ * DEG_TO_RAD;
-    double ref_lon_rad = ref_lon_ * DEG_TO_RAD;
-    
+    // 与 rtk_node 和 slam_nav_node 保持完全一致的简化平面投影公式
+    // 使用 111320.0 m/deg (而非球面公式 EARTH_RADIUS * radian_diff)
+    // 保证三处坐标系完全对齐
+    constexpr double kMetersPerDegreeLat = 111320.0;
+    constexpr double kDegToRad = M_PI / 180.0;
+    const double meters_per_degree_lon =
+        111320.0 * std::cos(ref_lat_ * kDegToRad);
+
     // X 轴（东西向）：经度差→米
-    x = EARTH_RADIUS * (lon_rad - ref_lon_rad) * std::cos(ref_lat_rad);
-    
+    x = (lon - ref_lon_) * meters_per_degree_lon;
+
     // Y 轴（南北向）：纬度差→米
-    y = EARTH_RADIUS * (lat_rad - ref_lat_rad);
+    y = (lat - ref_lat_) * kMetersPerDegreeLat;
 }
 
 }  // namespace slam_nav
