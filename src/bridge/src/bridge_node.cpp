@@ -140,9 +140,7 @@ void BridgeNode::DeclareAndLoadParams() {
     // 节点生命周期管理参数
     this->declare_parameter<std::string>("ros2_workspace", "");
     this->declare_parameter<std::string>("mapping_config_file", "mid360.yaml");
-    this->declare_parameter<std::string>("localization_config_file", "mid360.yaml");
     this->declare_parameter<std::string>("indoor_mapping_odom_topic", "/Odometry");
-    this->declare_parameter<std::string>("indoor_loc_odom_topic", "/localization");
     this->declare_parameter<std::string>("outdoor_odom_topic", "/outdoor/odom");
 
     tcp_port_        = static_cast<uint16_t>(this->get_parameter("tcp_port").as_int());
@@ -157,9 +155,7 @@ void BridgeNode::DeclareAndLoadParams() {
 
     ros2_workspace_           = this->get_parameter("ros2_workspace").as_string();
     mapping_config_file_      = this->get_parameter("mapping_config_file").as_string();
-    localization_config_file_ = this->get_parameter("localization_config_file").as_string();
     indoor_mapping_odom_topic_   = this->get_parameter("indoor_mapping_odom_topic").as_string();
-    indoor_loc_odom_topic_       = this->get_parameter("indoor_loc_odom_topic").as_string();
     outdoor_odom_topic_          = this->get_parameter("outdoor_odom_topic").as_string();
 }
 
@@ -276,13 +272,12 @@ void BridgeNode::OnTcpMessage(int client_fd, const std::string& msg) {
             tcp_server_->sendTo(client_fd, status);
 
         } else if (cmd == "start_mapping" || cmd == "stop_mapping" ||
-                   cmd == "start_indoor_loc" || cmd == "stop_indoor_loc" ||
                    cmd == "start_outdoor" || cmd == "stop_outdoor") {
             HandleLifecycleCmd(client_fd, cmd);
 
         } else {
             tcp_server_->sendTo(client_fd,
-                R"({"error":"unknown cmd","supported":["nav_goal","nav_waypoints","nav_cancel","nav_pause","nav_resume","query_status","start_mapping","stop_mapping","start_indoor_loc","stop_indoor_loc","start_outdoor","stop_outdoor"]})");
+                R"({"error":"unknown cmd","supported":["nav_goal","nav_waypoints","nav_cancel","nav_pause","nav_resume","query_status","start_mapping","stop_mapping","start_outdoor","stop_outdoor"]})");
         }
 
     } catch (const nlohmann::json::exception& e) {
@@ -603,23 +598,6 @@ void BridgeNode::HandleLifecycleCmd(int client_fd, const std::string& subcmd) {
             StopManagedProcess("mapping");
         }).detach();
 
-    } else if (subcmd == "start_indoor_loc") {
-        // 停止纯建图，启动含全局定位的完整室内定位
-        StopManagedProcess("mapping");
-        auto cmd = make_launch("location", "velodyne_localization.launch.py",
-                               localization_config_file_);
-        StartManagedProcess("indoor_loc", cmd);
-        // 等 transform_fusion 起来后切换到 /localization
-        // 稍作延迟（由上层逻辑决定），这里先切 odom topic
-        PublishNavModeSwitch(indoor_loc_odom_topic_, false);
-        RCLCPP_INFO(this->get_logger(), "[回复] ack:start_indoor_loc");
-        tcp_server_->sendTo(client_fd, R"({"ack":"start_indoor_loc"})");
-
-    } else if (subcmd == "stop_indoor_loc") {
-        StopManagedProcess("indoor_loc");
-        RCLCPP_INFO(this->get_logger(), "[回复] ack:stop_indoor_loc");
-        tcp_server_->sendTo(client_fd, R"({"ack":"stop_indoor_loc"})");
-
     } else if (subcmd == "start_outdoor") {
         // 先立即回复 ack, 避免 TCP 线程在 StopManagedProcess 阻塞期间超时
         RCLCPP_INFO(this->get_logger(), "[回复] ack:start_outdoor (异步启动RTK中)");
@@ -627,7 +605,6 @@ void BridgeNode::HandleLifecycleCmd(int client_fd, const std::string& subcmd) {
         auto rtk_cmd = make_launch("rtk", "rtk_launch.py", "");
         std::thread([this, rtk_cmd]() {
             // 先停旧进程 (可能阻塞数秒, 异步执行)
-            StopManagedProcess("indoor_loc");
             StopManagedProcess("mapping");
             // 启动 RTK
             StartManagedProcess("rtk", rtk_cmd);
@@ -641,15 +618,7 @@ void BridgeNode::HandleLifecycleCmd(int client_fd, const std::string& subcmd) {
         tcp_server_->sendTo(client_fd, R"({"ack":"stop_outdoor"})");
         std::thread([this]() {
             StopManagedProcess("rtk");
-            // 切回室内定位 odom
-            bool indoor_loc_running = false;
-            {
-                std::lock_guard<std::mutex> lock(proc_mutex_);
-                indoor_loc_running = managed_pids_.count("indoor_loc") > 0;
-            }
-            const std::string& indoor_topic = indoor_loc_running
-                ? indoor_loc_odom_topic_ : indoor_mapping_odom_topic_;
-            PublishNavModeSwitch(indoor_topic, false);
+            PublishNavModeSwitch(indoor_mapping_odom_topic_, false);
         }).detach();
     }
 }

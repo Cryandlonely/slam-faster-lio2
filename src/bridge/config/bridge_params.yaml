@@ -26,14 +26,8 @@ bridge_node:
     # 建图 launch 使用的配置文件名 (在 location/config/ 目录下)
     mapping_config_file: "mid360.yaml"
 
-    # 室内定位 launch 使用的配置文件名
-    localization_config_file: "mid360.yaml"
-
-    # 纯建图模式的定位话题 (FAST-LIO /Odometry, 仅当次运行有效)
+    # 纯建图模式的定位话题 (FAST-LIO /Odometry)
     indoor_mapping_odom_topic: "/Odometry"
-
-    # 室内定位模式的定位话题 (transform_fusion 输出, 跨会话全局位姿)
-    indoor_loc_odom_topic: "/localization"
 
     # 室外 RTK 定位话题
     outdoor_odom_topic: "/outdoor/odom"

@@ -10,16 +10,8 @@
 【生命周期管理】
   start_mapping      → 启动 FAST-LIO 建图节点, 定位源切换为 /Odometry
   stop_mapping       → 停止建图节点
-  start_indoor_loc   → 启动室内定位 (global_localization + transform_fusion), 定位源切换为 /localization
-  stop_indoor_loc    → 停止室内定位节点
   start_outdoor      → 启动 RTK 节点, 定位源切换为 /outdoor/odom, 规划器切为直线
-  stop_outdoor       → 停止 RTK 节点, 定位源切换回室内
-
-【导航指令 — 室内（本地坐标 map 系）】
-  nav_goal      {"cmd":"nav_goal","coord_mode":"local","x":1.0,"y":2.0,"yaw":0.0}
-  nav_waypoints {"cmd":"nav_waypoints","coord_mode":"local",
-                 "waypoints":[{"x":1.0,"y":2.0},{"x":3.0,"y":4.0,"yaw":1.57}],
-                 "target_vel":0.5}
+  stop_outdoor       → 停止 RTK 节点, 定位源切换回 /Odometry
 
 【导航指令 — 室外（WGS84 经纬度）】
   nav_goal      {"cmd":"nav_goal","coord_mode":"gps","lat":36.66123,"lon":117.01688}
@@ -169,31 +161,6 @@ def send_nav_and_wait(data: dict, timeout: float = 300.0) -> str:
 
 # ==================== 输入工具 ====================
 
-def read_coord_mode() -> str:
-    raw = input("坐标模式 [1=local 室内坐标, 2=gps 室外经纬度, 回车默认1]: ").strip()
-    if raw in ("2", "gps", "g"):
-        return "gps"
-    return "local"
-
-
-def read_local_point(prompt: str):
-    while True:
-        raw = input(prompt).strip()
-        if not raw:
-            return None
-        parts = raw.replace(",", " ").split()
-        if len(parts) < 2:
-            print("  格式错误, 至少输入 x y")
-            continue
-        try:
-            x = float(parts[0])
-            y = float(parts[1])
-            yaw = float(parts[2]) if len(parts) >= 3 else 0.0
-            return x, y, yaw
-        except ValueError:
-            print("  数值格式错误")
-
-
 def read_gps_point(prompt: str):
     while True:
         raw = input(prompt).strip()
@@ -228,32 +195,20 @@ def do_lifecycle(subcmd: str):
     DESC = {
         "start_mapping":    "启动建图  (定位源 -> /Odometry)",
         "stop_mapping":     "停止建图",
-        "start_indoor_loc": "切换室内定位模式  (定位源 -> /localization)",
-        "stop_indoor_loc":  "停止室内定位节点",
         "start_outdoor":    "切换室外RTK模式  (定位源 -> /outdoor/odom, 直线规划)",
-        "stop_outdoor":     "停止室外RTK, 切回室内定位",
+        "stop_outdoor":     "停止室外RTK, 定位源切回 /Odometry",
     }
     print(f"  -> {DESC.get(subcmd, subcmd)}")
     send_and_print({"cmd": subcmd})
 
 
 def do_goal():
-    coord_mode = read_coord_mode()
-    if coord_mode == "gps":
-        wp = read_gps_point("目标点 (lat lon [yaw_rad], 回车取消): ")
-        if wp is None:
-            print("已取消")
-            return
-        data = {"cmd": "nav_goal", "coord_mode": "gps", **wp}
-        print(f"  -> GPS单点导航: lat={wp['lat']}, lon={wp['lon']}")
-    else:
-        pt = read_local_point("目标点 (x y [yaw_rad], 回车取消): ")
-        if pt is None:
-            print("已取消")
-            return
-        x, y, yaw = pt
-        data = {"cmd": "nav_goal", "coord_mode": "local", "x": x, "y": y, "yaw": yaw}
-        print(f"  -> 本地单点导航: x={x}, y={y}, yaw={yaw}")
+    wp = read_gps_point("目标点 (lat lon [yaw_rad], 回车取消): ")
+    if wp is None:
+        print("已取消")
+        return
+    data = {"cmd": "nav_goal", "coord_mode": "gps", **wp}
+    print(f"  -> GPS单点导航: lat={wp['lat']}, lon={wp['lon']}")
     print("  等待到达目标点 (含朝向对齐)...")
     result = send_nav_and_wait(data)
     print()  # 换行，避免覆盖实时位置行
@@ -266,21 +221,14 @@ def do_goal():
 
 
 def do_waypoints():
-    coord_mode = read_coord_mode()
     waypoints = []
     print("逐个输入航点 (直接回车结束):")
     idx = 1
     while True:
-        if coord_mode == "gps":
-            wp = read_gps_point(f"  航点{idx} (lat lon [yaw_rad]): ")
-            if wp is None:
-                break
-            waypoints.append(wp)
-        else:
-            pt = read_local_point(f"  航点{idx} (x y [yaw_rad]): ")
-            if pt is None:
-                break
-            waypoints.append({"x": pt[0], "y": pt[1], "yaw": pt[2]})
+        wp = read_gps_point(f"  航点{idx} (lat lon [yaw_rad]): ")
+        if wp is None:
+            break
+        waypoints.append(wp)
         idx += 1
 
     if not waypoints:
@@ -290,15 +238,12 @@ def do_waypoints():
     vel = read_target_vel()
     data = {
         "cmd": "nav_waypoints",
-        "coord_mode": coord_mode,
+        "coord_mode": "gps",
         "waypoints": waypoints,
         "target_vel": vel,
     }
-    if coord_mode == "gps":
-        summary = " -> ".join(f"({w['lat']:.6f},{w['lon']:.6f})" for w in waypoints)
-    else:
-        summary = " -> ".join(f"({w['x']},{w['y']})" for w in waypoints)
-    print(f"  -> 多点导航 ({len(waypoints)}点 {coord_mode}): {summary}, 速度={vel}m/s")
+    summary = " -> ".join(f"({w['lat']:.6f},{w['lon']:.6f})" for w in waypoints)
+    print(f"  -> 多点导航 ({len(waypoints)}点 GPS): {summary}, 速度={vel}m/s")
     print("  等待到达所有航点 (含末点朝向对齐)...")
     result = send_nav_and_wait(data)
     print()
@@ -430,17 +375,11 @@ MENU = """
   【生命周期】
   m1 - 开始建图
   m2 - 停止建图
-  m3 - 切换室内定位模式
-  m4 - 切换室外RTK模式
-  m5 - 停止室外RTK (切回室内)
-  【导航】
-  1  - 单点导航 (local/gps)
-  2  - 多点导航 (local/gps)
-  3  - 取消导航 (清除任务)
-  4  - 暂停导航 (车子停止保留任务)
-  5  - 继续导航
-  【状态】
-  6  - 实时位置 (按回车退出)
+  m3 - 切换室外RTK模式
+  m4 - 停止室外RTK
+  【导航 (GPS)】
+  1  - 单点导航
+  2  - 多点导航
   7  - 查询完整状态
   8  - 下载实时点云 trans.pcd
   q  - 退出
@@ -465,9 +404,8 @@ def main():
     DISPATCH = {
         "m1": lambda: do_lifecycle("start_mapping"),
         "m2": lambda: do_lifecycle("stop_mapping"),
-        "m3": lambda: do_lifecycle("start_indoor_loc"),
-        "m4": lambda: do_lifecycle("start_outdoor"),
-        "m5": lambda: do_lifecycle("stop_outdoor"),
+        "m3": lambda: do_lifecycle("start_outdoor"),
+        "m4": lambda: do_lifecycle("stop_outdoor"),
         "1":  do_goal,
         "2":  do_waypoints,
         "3":  do_stop,

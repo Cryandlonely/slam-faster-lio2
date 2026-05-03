@@ -7,14 +7,14 @@ slam_nav_node:
 
     # ==================== 启动默认值 ====================
     nav:
-      mode: "slam"                 # 启动时默认模式 (运行时由 bridge/start_mapping 等命令切换)
+      mode: "gps"                  # 室外GPS模式
 
     # ==================== SLAM 定位源配置 ====================
     slam:
       odom_topic: "/Odometry"        # 启动时默认订阅话题 (运行时由 bridge 动态切换)
       map_frame: "map"
       base_frame: "base_link"
-      use_tf_pose: true              # 通过 TF (map→base_link) 获取底盘位姿
+      use_tf_pose: false             # 不使用 TF (map→base_link)
 
     # ==================== 室外坐标转换参考点 ====================
     # (室外导航时将经纬度转换为本地坐标所用, 需与 RTK 包配置一致)
@@ -25,7 +25,7 @@ slam_nav_node:
 
     # ==================== 规划参数 ====================
     planning:
-      use_astar: true                # 启动时默认用 A* (室外模式下 bridge 会强制切为直线规划)
+      use_astar: false               # 室外直线规划
       map_topic: "map"
       path_resolution: 0.05          # 路径点间距 (m)
       target_speed: 2.0              # 默认目标速度 (m/s)
