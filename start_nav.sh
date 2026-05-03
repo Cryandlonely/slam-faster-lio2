@@ -135,8 +135,8 @@ launch_module "livox_driver" "ros2 launch livox_ros_driver2 msg_MID360s_launch.p
 echo -e "${YELLOW}[2/4] 底盘驱动${NC}"
 launch_module "chassis" "ros2 launch chassis chassis_launch.py" 1
 
-# ---- 4. 导航规划 ----
-echo -e "${YELLOW}[4/5] 导航规划${NC}"
+# ---- 3. 导航规划 ----
+echo -e "${YELLOW}[3/4] 导航规划${NC}"
 launch_module "nav_planner" "ros2 launch nav_planner slam_nav_launch.py" 2
 
 # ---- 4. TCP 桥接 ----

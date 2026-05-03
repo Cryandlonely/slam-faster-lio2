@@ -505,15 +505,33 @@ void SlamNavNode::LivoxCallback(
     if (!obstacle_avoidance_enabled_) return;
 
     // 获取 livox_frame → map 的 TF 变换
+    // GPS模式下无 SLAM 输出, map 帧不存在, 用里程计位姿手动构造等效变换
     geometry_msgs::msg::TransformStamped tf_stamped;
     try {
         tf_stamped = tf_buffer_->lookupTransform(
             map_frame_, lidar_frame_, tf2::TimePointZero);
     } catch (const tf2::TransformException& ex) {
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
-            "[动态避障] TF 查询失败 (%s→%s): %s",
-            lidar_frame_.c_str(), map_frame_.c_str(), ex.what());
-        return;
+        if (gps_mode_) {
+            // GPS模式: 用当前里程计位姿 (ENU) 构造 livox_frame → ENU 的变换
+            Pose2D pose_snap;
+            {
+                std::lock_guard<std::mutex> lk(data_mutex_);
+                if (!localization_received_) return;
+                pose_snap = current_pose_;
+            }
+            const double half_yaw = pose_snap.yaw * 0.5;
+            tf_stamped.transform.rotation.w = std::cos(half_yaw);
+            tf_stamped.transform.rotation.x = 0.0;
+            tf_stamped.transform.rotation.y = 0.0;
+            tf_stamped.transform.rotation.z = std::sin(half_yaw);
+            tf_stamped.transform.translation.x = pose_snap.x;
+            tf_stamped.transform.translation.y = pose_snap.y;
+        } else {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
+                "[动态避障] TF 查询失败 (%s→%s): %s",
+                lidar_frame_.c_str(), map_frame_.c_str(), ex.what());
+            return;
+        }
     }
 
     // 提取旋转矩阵 (四元数 → 3x3)
@@ -954,15 +972,14 @@ void SlamNavNode::ControlLoop() {
                                 RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                                     "[动态避障-GPS] 前方路径被堵塞, 停车等待障碍移开...");
                             }
-                        } else if (!gps_avoidance_) {
-                            // 停车等待模式下持续停车
+                        } else {
+                            // 冷却期内无论哪种避障模式都停车等待
                             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                                "[动态避障-GPS] 前方路径被堵塞, 停车等待障碍移开...");
+                                "[动态避障-GPS] 前方路径被堵塞, 冷却等待中, 停车...");
                         }
-                        if (!gps_avoidance_) {
-                            PublishStopCmd();
-                            return;
-                        }
+                        // 路径被堵时统一停车
+                        PublishStopCmd();
+                        return;
                     }
                 }
             }

@@ -1,5 +1,5 @@
 # SLAM 导航规划节点参数配置
-# 注意: 运行时的定位源切换 (室内建图/室内定位/室外RTK) 均通过 bridge 模块动态控制
+# 注意: 运行时的定位源切换 (室内建图/室外RTK) 均通过 bridge 模块动态控制
 #       本文件只配置启动默认值和固定参数
 
 slam_nav_node:
@@ -26,13 +26,10 @@ slam_nav_node:
     # ==================== 规划参数 ====================
     planning:
       use_astar: false               # 室外直线规划
-      map_topic: "map"
       path_resolution: 0.05          # 路径点间距 (m)
       target_speed: 2.0              # 默认目标速度 (m/s)
       slow_down_dist: 1.0            # 减速区距离 (m), 0.0 = 禁用减速
       min_speed: 0.1                # 减速区最低速度 (m/s)
-      obstacle_inflate: 7            # 障碍物膨胀格数 (安全裕量=格数×0.05m=0.35m)
-      occupied_thresh: 65            # 栅格占用阈值
 
     # ==================== 跟踪参数 ====================
     tracking:
