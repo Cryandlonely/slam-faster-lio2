@@ -394,8 +394,13 @@ void RtkNode::convertToLocalEnu(double lat, double lon,
 
 void RtkNode::publishGpsData()
 {
-    std::lock_guard<std::mutex> lock(data_mutex_);
-    
+    // 持锁仅拷贝数据, 释放后再做 publish (序列化耗时较长, 持锁会阻塞串口读线程)
+    GpsData snap;
+    {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        snap = current_gps_data_;
+    }
+
     auto now = this->now();
     
     // -------- NavSatFix --------
@@ -403,12 +408,12 @@ void RtkNode::publishGpsData()
     nav_msg.header.stamp    = now;
     nav_msg.header.frame_id = "gps";
     
-    nav_msg.latitude  = current_gps_data_.latitude;
-    nav_msg.longitude = current_gps_data_.longitude;
-    nav_msg.altitude  = current_gps_data_.altitude;
+    nav_msg.latitude  = snap.latitude;
+    nav_msg.longitude = snap.longitude;
+    nav_msg.altitude  = snap.altitude;
     
     // pos_type → NavSatStatus 映射 (参考表 9-47)
-    switch (current_gps_data_.pos_type) {
+    switch (snap.pos_type) {
         case 48: case 49: case 50: case 56:         // L1_INT / WIDE_INT / NARROW_INT / INS_RTKFIXED
             nav_msg.status.status = sensor_msgs::msg::NavSatStatus::STATUS_GBAS_FIX;
             break;
@@ -429,9 +434,9 @@ void RtkNode::publishGpsData()
                              sensor_msgs::msg::NavSatStatus::SERVICE_COMPASS;
     
     // 使用 BESTPOS sigma 直接填充对角协方差 (单位: m²)
-    double cov_lat = static_cast<double>(current_gps_data_.lat_sigma) * current_gps_data_.lat_sigma;
-    double cov_lon = static_cast<double>(current_gps_data_.lon_sigma) * current_gps_data_.lon_sigma;
-    double cov_hgt = static_cast<double>(current_gps_data_.hgt_sigma) * current_gps_data_.hgt_sigma;
+    double cov_lat = static_cast<double>(snap.lat_sigma) * snap.lat_sigma;
+    double cov_lon = static_cast<double>(snap.lon_sigma) * snap.lon_sigma;
+    double cov_hgt = static_cast<double>(snap.hgt_sigma) * snap.hgt_sigma;
     nav_msg.position_covariance[0] = cov_lat;
     nav_msg.position_covariance[4] = cov_lon;
     nav_msg.position_covariance[8] = cov_hgt;
@@ -455,21 +460,21 @@ void RtkNode::publishGpsData()
     odom_msg.child_frame_id  = "base_link";
 
     double x_east = 0.0, y_north = 0.0;
-    if (current_gps_data_.valid) {
-        convertToLocalEnu(current_gps_data_.latitude,
-                          current_gps_data_.longitude,
+    if (snap.valid) {
+        convertToLocalEnu(snap.latitude,
+                          snap.longitude,
                           x_east, y_north);
     }
 
     odom_msg.pose.pose.position.x = x_east;    // 东向 (m)
     odom_msg.pose.pose.position.y = y_north;    // 北向 (m)
-    odom_msg.pose.pose.position.z = current_gps_data_.altitude;
+    odom_msg.pose.pose.position.z = snap.altitude;
 
     // RTK HEADING 航向: 正北顺时针 → ENU 约定 (yaw=0 朝东, 逆时针为正)
     // 1) 先补偿天线安装偏移: heading_corrected = heading_raw + offset
     // 2) 再转 ENU: yaw_enu = π/2 - heading_corrected_rad
-    if (current_gps_data_.heading_valid) {
-        double heading_corrected = current_gps_data_.heading_deg + antenna_heading_offset_deg_;
+    if (snap.heading_valid) {
+        double heading_corrected = snap.heading_deg + antenna_heading_offset_deg_;
         double heading_rad = heading_corrected * M_PI / 180.0;
         double yaw_enu = M_PI / 2.0 - heading_rad;
         // 归一化到 [-π, π]
@@ -483,7 +488,7 @@ void RtkNode::publishGpsData()
         odom_msg.pose.pose.orientation.z = std::sin(yaw_enu / 2.0);
 
         // 航向协方差：用标准偏差换算 (deg→rad)²
-        double hdg_cov = (current_gps_data_.hdg_std_dev * M_PI / 180.0);
+        double hdg_cov = (snap.hdg_std_dev * M_PI / 180.0);
         hdg_cov *= hdg_cov;
         odom_msg.pose.covariance[35] = hdg_cov;   // yaw 协方差
 
@@ -506,7 +511,7 @@ void RtkNode::publishGpsData()
     odom_msg.pose.covariance[21] = 9999.0;
     odom_msg.pose.covariance[28] = 9999.0;
     // yaw 协方差: 有 heading 时已在上方填充, 无 heading 时设为极大
-    if (!current_gps_data_.heading_valid) {
+    if (!snap.heading_valid) {
         odom_msg.pose.covariance[35] = 9999.0;
     }
 
@@ -521,29 +526,29 @@ void RtkNode::publishGpsData()
             "BESTPOS: lat=%.9f lon=%.9f hgt=%.4fm "
             "| sol=%u pos_type=%u svs=%u/%u "
             "| σ(lat=%.4f lon=%.4f hgt=%.4f)m diff_age=%.1fs sol_age=%.1fs",
-            current_gps_data_.latitude, current_gps_data_.longitude, current_gps_data_.altitude,
-            current_gps_data_.sol_status, current_gps_data_.pos_type,
-            current_gps_data_.num_soln_svs, current_gps_data_.num_satellites,
-            current_gps_data_.lat_sigma, current_gps_data_.lon_sigma, current_gps_data_.hgt_sigma,
-            current_gps_data_.diff_age, current_gps_data_.sol_age);
+            snap.latitude, snap.longitude, snap.altitude,
+            snap.sol_status, snap.pos_type,
+            snap.num_soln_svs, snap.num_satellites,
+            snap.lat_sigma, snap.lon_sigma, snap.hgt_sigma,
+            snap.diff_age, snap.sol_age);
 
-        if (current_gps_data_.heading_valid) {
-            double hdg_corrected = current_gps_data_.heading_deg + antenna_heading_offset_deg_;
+        if (snap.heading_valid) {
+            double hdg_corrected = snap.heading_deg + antenna_heading_offset_deg_;
             double yaw_enu = M_PI / 2.0 - hdg_corrected * M_PI / 180.0;
             while (yaw_enu >  M_PI) yaw_enu -= 2.0 * M_PI;
             while (yaw_enu < -M_PI) yaw_enu += 2.0 * M_PI;
             RCLCPP_INFO(this->get_logger(),
                 "HEADING: raw=%.2f° +offset=%.1f° → corrected=%.2f° → ENU_yaw=%.4f rad (%.2f°)"
                 " | pitch=%.2f° | baseline=%.3fm | σ(hdg=%.3f°) | sol=%u pos_type=%u",
-                current_gps_data_.heading_deg, antenna_heading_offset_deg_, hdg_corrected,
+                snap.heading_deg, antenna_heading_offset_deg_, hdg_corrected,
                 yaw_enu, yaw_enu * 180.0 / M_PI,
-                current_gps_data_.pitch_deg,
-                current_gps_data_.baseline_length, current_gps_data_.hdg_std_dev,
-                current_gps_data_.hdg_sol_status, current_gps_data_.hdg_pos_type);
+                snap.pitch_deg,
+                snap.baseline_length, snap.hdg_std_dev,
+                snap.hdg_sol_status, snap.hdg_pos_type);
         } else {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
                 "HEADING: 无有效航向 (sol_status=%u) | HEADING消息总收到=%u, BESTPOS总收到=%u",
-                current_gps_data_.hdg_sol_status,
+                snap.hdg_sol_status,
                 heading_msg_count_, bestpos_msg_count_);
         }
     }

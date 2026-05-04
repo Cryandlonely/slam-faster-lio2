@@ -599,27 +599,18 @@ void BridgeNode::HandleLifecycleCmd(int client_fd, const std::string& subcmd) {
         }).detach();
 
     } else if (subcmd == "start_outdoor") {
-        // 先立即回复 ack, 避免 TCP 线程在 StopManagedProcess 阻塞期间超时
-        RCLCPP_INFO(this->get_logger(), "[回复] ack:start_outdoor (异步启动RTK中)");
+        // RTK 已由 slam_nav_launch.py 自动启动, 无需再次 fork 进程
+        // 只需通知 nav_planner 将定位源切换为 /outdoor/odom
+        RCLCPP_INFO(this->get_logger(), "[回复] ack:start_outdoor (RTK已自动运行, 仅切换定位源)");
         tcp_server_->sendTo(client_fd, R"({"ack":"start_outdoor"})");
-        auto rtk_cmd = make_launch("rtk", "rtk_launch.py", "");
-        std::thread([this, rtk_cmd]() {
-            // 先停旧进程 (可能阻塞数秒, 异步执行)
-            StopManagedProcess("mapping");
-            // 启动 RTK
-            StartManagedProcess("rtk", rtk_cmd);
-            // 通知 nav_planner 切换定位源
-            PublishNavModeSwitch(outdoor_odom_topic_, true);
-        }).detach();
+        PublishNavModeSwitch(outdoor_odom_topic_, true);
 
     } else if (subcmd == "stop_outdoor") {
-        // 先立即回复 ack
-        RCLCPP_INFO(this->get_logger(), "[回复] ack:stop_outdoor (异步停止RTK中)");
+        // RTK 由 launch 文件管理, 不手动停止
+        // 只将 nav_planner 定位源切回 SLAM
+        RCLCPP_INFO(this->get_logger(), "[回复] ack:stop_outdoor (仅切换定位源至室内SLAM)");
         tcp_server_->sendTo(client_fd, R"({"ack":"stop_outdoor"})");
-        std::thread([this]() {
-            StopManagedProcess("rtk");
-            PublishNavModeSwitch(indoor_mapping_odom_topic_, false);
-        }).detach();
+        PublishNavModeSwitch(indoor_mapping_odom_topic_, false);
     }
 }
 

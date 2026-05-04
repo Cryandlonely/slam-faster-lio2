@@ -27,6 +27,9 @@ struct TrackerParams {
     double heading_align_threshold = 0.524; // 航向对齐阈值 (rad)。配置文件输入度数，slam_nav_node 踏入时自动换算为弧度
     double max_accel            = 1.0;   // 最大线加速度 (m/s²), 限制起步/转弯时的速度突变; <=0 禁用
     double control_dt           = 0.05;  // 控制周期 (s), 由 control.rate 决定
+    double slow_down_dist       = 2.0;   // 末段减速区距离 (m), 实时用 dist_to_goal 计算
+    double min_speed            = 0.3;   // 减速区最低速度 (m/s)
+    double corner_min_speed     = 0.0;   // 转弯减速最低速度 (m/s); >0 时启用: 航向误差0°→全速, 90°→此值
 };
 
 /// Pure Pursuit 轨迹跟踪器 (万向轮底盘适配)

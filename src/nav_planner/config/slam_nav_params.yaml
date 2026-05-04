@@ -1,82 +1,73 @@
-# SLAM 导航规划节点参数配置
-# 注意: 运行时的定位源切换 (室内建图/室外RTK) 均通过 bridge 模块动态控制
-#       本文件只配置启动默认值和固定参数
+# SLAM 导航规划节点参数配置 — 室外GPS履带车模式
 
 slam_nav_node:
   ros__parameters:
 
-    # ==================== 启动默认值 ====================
     nav:
-      mode: "gps"                  # 室外GPS模式
+      mode: "gps"
 
-    # ==================== SLAM 定位源配置 ====================
-    slam:
-      odom_topic: "/Odometry"        # 启动时默认订阅话题 (运行时由 bridge 动态切换)
-      map_frame: "map"
-      base_frame: "base_link"
-      use_tf_pose: false             # 不使用 TF (map→base_link)
-
-    # ==================== 室外坐标转换参考点 ====================
-    # (室外导航时将经纬度转换为本地坐标所用, 需与 RTK 包配置一致)
+    # RTK 室外定位源
     outdoor:
       odom_topic: "/outdoor/odom"
       ref_latitude: 36.66111
       ref_longitude: 117.01665
 
-    # ==================== 规划参数 ====================
+    # SLAM 定位源 (备用, GPS模式不启用)
+    slam:
+      odom_topic: "/Odometry"
+      map_frame: "map"
+      base_frame: "body"
+
+    # 规划参数
     planning:
       use_astar: false               # 室外直线规划
-      path_resolution: 0.05          # 路径点间距 (m)
-      target_speed: 2.0              # 默认目标速度 (m/s)
-      slow_down_dist: 1.0            # 减速区距离 (m), 0.0 = 禁用减速
-      min_speed: 0.1                # 减速区最低速度 (m/s)
+      path_resolution: 0.5           # 路径点间距 (m)
+      target_speed: 1.5              # 目标速度 (m/s)
+      slow_down_dist: 4.0            # 终点减速区距离 (m)
+      min_speed: 0.2                 # 减速区最低速度 (m/s)
 
-    # ==================== 跟踪参数 ====================
+    # 跟踪参数
     tracking:
       lookahead_distance: 0.6
       min_lookahead: 0.2
       max_lookahead: 2.0
-      lookahead_gain: 0.8
-      goal_tolerance: 0.15           # 到达判定阈值 (m)
-      heading_tolerance: 0.15        # 航向到达阈值 (rad, ~8.6°)
-      max_linear_x: 2.0              # 最大前进速度 (m/s)
-      max_linear_y: 0.5              # 最大横移速度 (m/s)
+      lookahead_gain: 0.3
+      goal_tolerance: 0.5            # 到达判定阈值 (m)
+      heading_tolerance: 180.0       # 到达后不对齐朝向
+      max_linear_x: 1.5              # 最大前进速度 (m/s)
       max_angular_velocity: 1.0      # 最大角速度 (rad/s)
-      heading_kp: 1.5
-      cte_kp: 1.0
-      cmd_filter_alpha: 0.3
-      heading_align_threshold: 30.0 # 航向对齐阈值 (度, 超过此角度则先旋转对齐再前进)
-      max_accel: 1.0                 # 最大线加速度 (m/s²), 限制起步/路径切换时速度突变; <=0 禁用
+      heading_kp: 0.8
+      cte_kp: 0.3
+      cmd_filter_alpha: 0.6
+      heading_align_threshold: 15.0  # 起步导向对齐阈值 (度)
+      max_accel: 1.0                 # 最大加速度 (m/s²); <=0 禁用
+      corner_min_speed: 0.1          # 转弯最低速度 (m/s); 0=禁用
 
-    # ==================== 控制频率 ====================
     control:
-      rate: 20.0                     # Hz
+      rate: 10.0                     # 控制频率 (Hz)
 
-    # ==================== SDK 接口 ====================
+    # SDK 接口
     sdk:
-      max_vx: 2.0
+      max_vx: 1.5
       max_vy: 2.0
       max_yaw_rate: 1.0
-      default_mode: 3                # 默认模式 (3=站立)
-      enable_posture_fields: false
 
-    # ==================== 动态避障参数 ====================
+    # 动态避障
     obstacle:
-      enable: true                   # 动态避障开关
-      lidar_topic: "/livox/lidar"     # Livox 点云话题
-      lidar_frame: "livox_frame"      # Livox 驱动输出帧 ID
-      z_min: 0.15                    # 高度过滤下限 (m), 去除地面点
-      z_max: 2.0                     # 高度过滤上限 (m), 去除天花板点
-      fov_half_deg: 90.0             # 前向半角 FOV (度), 90=前半球, 60=前方锥形
-      dynamic_ttl: 3.0               # 动态障碍物生存时间 (s), 到期自动清除
-      replan_lookahead: 3.0          # 路径堵塞检测预视距离 (m)
-      replan_cooldown: 2.0           # 重规划冷却时间 (s), 防止反复触发
-      lidar_subsample: 5             # 点云采样间隔比(降低 CPU 占用)
-      corridor_width: 0.6            # 路径廊道半宽 (m), GPS模式障碍检测用; 约等于机器人宽度的一半+裕量
-      gps_avoidance: true           # GPS模式下是否启用绕行: true=计算绕路点绕行, false=停车等待
-      detour_lateral: 1.5            # 绕路点横向偏移 (m), 需大于机器人宽度
-      detour_forward: 1.5            # 绕路点向前偏移 (m), 绕过障碍中心
+      enable: true
+      lidar_topic: "/livox/lidar"
+      lidar_frame: "livox_frame"
+      z_min: 0.15
+      z_max: 2.0
+      fov_half_deg: 90.0
+      dynamic_ttl: 3.0
+      replan_lookahead: 3.0
+      replan_cooldown: 2.0
+      lidar_subsample: 5
+      corridor_width: 0.6
+      gps_avoidance: true
+      detour_lateral: 1.5
+      detour_forward: 1.5
 
-    # ==================== 调试 ====================
     debug:
-      status_rate: 2.0               # Hz
+      status_rate: 10.0

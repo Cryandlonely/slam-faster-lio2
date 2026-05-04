@@ -135,8 +135,8 @@ launch_module "livox_driver" "ros2 launch livox_ros_driver2 msg_MID360s_launch.p
 echo -e "${YELLOW}[2/4] 底盘驱动${NC}"
 launch_module "chassis" "ros2 launch chassis chassis_launch.py" 1
 
-# ---- 3. 导航规划 ----
-echo -e "${YELLOW}[3/4] 导航规划${NC}"
+# ---- 3. 导航规划 + RTK ----
+echo -e "${YELLOW}[3/4] 导航规划 + RTK 定位${NC}"
 launch_module "nav_planner" "ros2 launch nav_planner slam_nav_launch.py" 2
 
 # ---- 4. TCP 桥接 ----
@@ -145,7 +145,7 @@ launch_module "bridge" "ros2 launch bridge bridge_launch.py" 1
 
 echo ""
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}   全部模块已启动! (定位/建图请通过 bridge 手动启动)${NC}"
+echo -e "${GREEN}   全部模块已启动! (RTK 已随导航节点自动启动)${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
 echo -e "  日志目录: ${CYAN}$LOG_DIR/${NC}"

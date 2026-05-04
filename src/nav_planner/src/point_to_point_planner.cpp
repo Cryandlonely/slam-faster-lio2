@@ -158,6 +158,48 @@ bool PointToPointPlanner::PlanMulti(const Pose2D& current,
         seg_start = seg_end;
     }
 
+    // ── 转弯预减速后处理 ────────────────────────────────────────────────────
+    // 扫描路径中的方向突变点 (拐角), 在拐角前 slow_down_dist 内线性降速,
+    // 使车辆在到达拐角之前就已减速到安全速度, 避免高速冲过拐角后丢失直线。
+    {
+        const double kCornerThresh = 20.0 * M_PI / 180.0;   // ≥20° 触发预减速
+        const int sz = static_cast<int>(path_.size());
+
+        for (int ci = 1; ci + 1 < sz; ++ci) {
+            double dx1 = path_[ci].x   - path_[ci-1].x;
+            double dy1 = path_[ci].y   - path_[ci-1].y;
+            double dx2 = path_[ci+1].x - path_[ci].x;
+            double dy2 = path_[ci+1].y - path_[ci].y;
+            double l1  = std::sqrt(dx1*dx1 + dy1*dy1);
+            double l2  = std::sqrt(dx2*dx2 + dy2*dy2);
+            if (l1 < kEpsilon || l2 < kEpsilon) continue;
+
+            double cos_a = std::clamp((dx1*dx2 + dy1*dy2) / (l1 * l2), -1.0, 1.0);
+            double angle = std::acos(cos_a);   // [0, π]
+            if (angle < kCornerThresh) continue;
+
+            // 拐角处速度上限: 转角越大上限越低 (min_speed ~ target_speed)
+            double severity  = std::clamp(
+                (angle - kCornerThresh) / (M_PI - kCornerThresh), 0.0, 1.0);
+            double corner_cap = params_.min_speed +
+                (1.0 - severity) * (params_.target_speed - params_.min_speed);
+
+            // 向前回溯, 线性升速: 拐角处=corner_cap, slow_down_dist 外=target_speed
+            double accum = 0.0;
+            for (int j = ci; j >= 0; --j) {
+                if (j < ci) {
+                    accum += Distance(path_[j].x, path_[j].y,
+                                      path_[j+1].x, path_[j+1].y);
+                }
+                if (accum >= params_.slow_down_dist) break;
+                double ratio = (params_.slow_down_dist > kEpsilon)
+                               ? accum / params_.slow_down_dist : 1.0;
+                double v = corner_cap + ratio * (params_.target_speed - corner_cap);
+                path_[j].target_speed = std::min(path_[j].target_speed, v);
+            }
+        }
+    }
+
     valid_ = !path_.empty();
     return valid_;
 }

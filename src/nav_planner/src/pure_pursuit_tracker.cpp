@@ -47,26 +47,8 @@ bool PurePursuitTracker::ComputeControl(const Pose2D& current,
     // ---- 1b. 位置已到达 ----
     if (position_reached_ || dist_to_goal < params_.goal_tolerance) {
         position_reached_ = true;
-
-        if (!is_final_segment_) {
-            goal_reached_ = true;
-            return false;
-        }
-
-        double heading_error_to_goal = AngleDiff(goal.yaw, current.yaw);
-        debug_info_.heading_error = heading_error_to_goal;
-
-        if (std::abs(heading_error_to_goal) < params_.heading_tolerance) {
-            goal_reached_ = true;
-            return false;
-        }
-
-        // 原地旋转到目标 yaw
-        cmd.vx = 0.0;
-        cmd.vy = 0.0;
-        cmd.yaw_rate = params_.heading_kp * heading_error_to_goal;
-        cmd.yaw_rate = Clamp(cmd.yaw_rate, params_.max_angular_velocity);
-        return true;
+        goal_reached_ = true;
+        return false;
     }
 
     // ---- 2. 动态前视距离 ----
@@ -97,37 +79,32 @@ bool PurePursuitTracker::ComputeControl(const Pose2D& current,
         return true;
     }
 
-    // ---- 4b. 航向对齐阶段 ----
+    // ---- 4b. 航向对齐阶段 (仅在起步/静止时触发, 行进中不停车转向) ----
     {
         double desired_yaw_pre = std::atan2(dy_world, dx_world);
         double heading_err_pre = AngleDiff(desired_yaw_pre, current.yaw);
 
-        if (std::abs(heading_err_pre) > params_.heading_align_threshold) {
+        if (std::abs(heading_err_pre) > params_.heading_align_threshold
+            && prev_speed_ < 0.1)  // 只在静止时原地旋转, 运动中靠 yaw_rate 连续转向
+        {
             debug_info_.heading_error = heading_err_pre;
 
+            // 履带车原地转向: vx/vy 强制为 0, 不走低通滤波 (防止前冲)
             cmd.vx = 0.0;
             cmd.vy = 0.0;
             cmd.yaw_rate = params_.heading_kp * heading_err_pre;
             cmd.yaw_rate = Clamp(cmd.yaw_rate, params_.max_angular_velocity);
 
             double alpha = params_.cmd_filter_alpha;
-            cmd.vx       = alpha * cmd.vx       + (1.0 - alpha) * prev_vx_;
-            cmd.vy       = alpha * cmd.vy       + (1.0 - alpha) * prev_vy_;
             cmd.yaw_rate = alpha * cmd.yaw_rate + (1.0 - alpha) * prev_yaw_rate_;
 
-            prev_vx_ = cmd.vx;
-            prev_vy_ = cmd.vy;
+            prev_vx_ = 0.0;
+            prev_vy_ = 0.0;
             prev_yaw_rate_ = cmd.yaw_rate;
-            prev_speed_ = std::sqrt(cmd.vx * cmd.vx + cmd.vy * cmd.vy);
+            prev_speed_ = 0.0;
             return true;
         }
     }
-
-    // 世界→机器人坐标系旋转
-    double cos_yaw = std::cos(current.yaw);
-    double sin_yaw = std::sin(current.yaw);
-    double dx_body =  cos_yaw * dx_world + sin_yaw * dy_world;
-    double dy_body = -sin_yaw * dx_world + cos_yaw * dy_world;
 
     // ---- 5. 横向跟踪误差 (CTE) ----
     double cte = 0.0;
@@ -147,44 +124,54 @@ bool PurePursuitTracker::ComputeControl(const Pose2D& current,
     }
     debug_info_.cross_track_error = cte;
 
-    // ---- 6. 速度解算 ----
-    double target_speed = target.target_speed;
-    if (target_speed < kEpsilon) {
-        target_speed = params_.max_linear_x;
+    // ---- 6. 速度解算 (履带车只用 vx, vy 强制为 0) ----
+    // 提前计算前视方向误差, 供转弯减速使用
+    double desired_yaw = std::atan2(dy_world, dx_world);
+    double heading_error = AngleDiff(desired_yaw, current.yaw);
+
+    // 6a. 末段减速: 用实时 dist_to_goal 计算, 避免依赖路径点预烘焙的 target_speed
+    double target_speed = params_.max_linear_x;
+    if (params_.slow_down_dist > kEpsilon && dist_to_goal < params_.slow_down_dist) {
+        double ratio = dist_to_goal / params_.slow_down_dist;
+        target_speed = params_.min_speed + ratio * (params_.max_linear_x - params_.min_speed);
+        target_speed = std::max(target_speed, params_.min_speed);
     }
 
-    double dir_norm = std::sqrt(dx_body * dx_body + dy_body * dy_body);
-    if (dir_norm > kEpsilon) {
-        cmd.vx = target_speed * (dx_body / dir_norm);
-        cmd.vy = target_speed * (dy_body / dir_norm);
+    // 6b. 转弯减速: heading_error 越大速度越低, 防止履带车高速过弯跑偏
+    // 线性插值: 0° → target_speed,  90° → corner_min_speed
+    if (params_.corner_min_speed > kEpsilon) {
+        double herr_abs = std::abs(heading_error);
+        double turn_factor = std::max(0.0, 1.0 - herr_abs / (M_PI / 2.0));
+        double corner_speed = params_.corner_min_speed
+                              + turn_factor * (target_speed - params_.corner_min_speed);
+        target_speed = std::min(target_speed, std::max(corner_speed, params_.corner_min_speed));
     }
 
-    // ---- 6b. 横向纠偏 ----
-    if (std::abs(cte) > 0.03) {  // 室内死区 3cm (SLAM精度通常cm级)
-        int nn = nearest_index_;
-        int nn_next = std::min(nn + 1, static_cast<int>(path_.size()) - 1);
-        double seg_dx = path_[nn_next].x - path_[nn].x;
-        double seg_dy = path_[nn_next].y - path_[nn].y;
-        double seg_len = std::sqrt(seg_dx * seg_dx + seg_dy * seg_dy);
-        if (seg_len > kEpsilon) {
-            double normal_wx = seg_dy / seg_len;
-            double normal_wy = -seg_dx / seg_len;
-            double corr_wx = params_.cte_kp * cte * normal_wx;
-            double corr_wy = params_.cte_kp * cte * normal_wy;
-            double corr_bx =  cos_yaw * corr_wx + sin_yaw * corr_wy;
-            double corr_by = -sin_yaw * corr_wx + cos_yaw * corr_wy;
-            cmd.vx += corr_bx;
-            cmd.vy += corr_by;
+    // 6c. 路径预烘焙转角减速上限 (PlanMulti 在拐角前已设置较低的 target_speed)
+    // 比反应式 corner_min_speed 更早起效: 车辆尚未"看到"转角方向时就已开始减速
+    if (nearest_index_ < static_cast<int>(path_.size())) {
+        double baked = path_[nearest_index_].target_speed;
+        if (baked > kEpsilon) {
+            target_speed = std::min(target_speed, baked);
         }
     }
 
-    // ---- 7. 航向控制 ----
-    double desired_yaw = std::atan2(dy_world, dx_world);
-    double heading_error = AngleDiff(desired_yaw, current.yaw);
+    // 履带车: 只取前向分量, 横向分量通过 yaw_rate 纠偏
+    cmd.vx = target_speed;
+    cmd.vy = 0.0;
+
+    // ---- 6c. CTE 纠偏 → 叠加到 yaw_rate (履带车无 vy) ----
+    // cte > 0: 机器人在路径左侧 → 需右转 → yaw_rate 为负 → 取反
+    double cte_yaw_correction = 0.0;
+    if (std::abs(cte) > 0.20) {  // 20cm 死区: GPS/RTK水平精度±0.1~0.5m
+        cte_yaw_correction = -params_.cte_kp * cte;
+    }
+
+    // ---- 7. 航向控制 + CTE 纠偏 (履带车: 两者都叠加到 yaw_rate) ----
     debug_info_.heading_error = heading_error;
 
     double adaptive_kp = params_.heading_kp / (1.0 + 0.5 * speed);
-    cmd.yaw_rate = adaptive_kp * heading_error;
+    cmd.yaw_rate = adaptive_kp * heading_error + cte_yaw_correction;
 
     // ---- 8. 限幅 ----
     cmd.vx = Clamp(cmd.vx, params_.max_linear_x);
@@ -197,16 +184,12 @@ bool PurePursuitTracker::ComputeControl(const Pose2D& current,
     cmd.vy       = alpha * cmd.vy       + (1.0 - alpha) * prev_vy_;
     cmd.yaw_rate = alpha * cmd.yaw_rate + (1.0 - alpha) * prev_yaw_rate_;
 
-    // ---- 10. 加速度限幅 (防止起步/路径切换时速度突变) ----
+    // ---- 10. 加速度限幅 (只限加速, 不限减速 → 允许转弯前瞬间降速) ----
     if (params_.max_accel > 0.0 && params_.control_dt > 0.0) {
         double max_dv = params_.max_accel * params_.control_dt;
         double dvx = cmd.vx - prev_vx_;
-        double dvy = cmd.vy - prev_vy_;
-        double dv  = std::sqrt(dvx * dvx + dvy * dvy);
-        if (dv > max_dv) {
-            double scale = max_dv / dv;
-            cmd.vx = prev_vx_ + dvx * scale;
-            cmd.vy = prev_vy_ + dvy * scale;
+        if (dvx > max_dv) {  // 只限制加速, 减速不受限
+            cmd.vx = prev_vx_ + max_dv;
         }
     }
 
@@ -259,18 +242,29 @@ int PurePursuitTracker::FindLookaheadPoint(const Pose2D& current,
     }
 
     // ---- Step 2: 利用路径段投影推进 nearest_index_ ----
-    // 若机器人已冲过某路径点（到下一点的向量与机器人方向同侧），则跳过该点，
-    // 避免把身后的路径点当作前视目标，导致掉头行为。
-    while (nearest_index_ < static_cast<int>(path_.size()) - 1) {
-        double seg_dx = path_[nearest_index_ + 1].x - path_[nearest_index_].x;
-        double seg_dy = path_[nearest_index_ + 1].y - path_[nearest_index_].y;
-        double to_robot_x = current.x - path_[nearest_index_].x;
-        double to_robot_y = current.y - path_[nearest_index_].y;
-        // 点积 > 0 表示机器人已投影过该点，向前推进
-        if (seg_dx * to_robot_x + seg_dy * to_robot_y > 0.0) {
-            self->nearest_index_++;
-        } else {
-            break;
+    // 条件1: 路径方向投影 (原有逻辑)
+    // 条件2: 路径点在车身后方 (基于车辆朝向) —— 解决大幅冲过转角时掉头问题
+    {
+        double cos_h = std::cos(current.yaw);
+        double sin_h = std::sin(current.yaw);
+        while (nearest_index_ < static_cast<int>(path_.size()) - 1) {
+            // 条件1: 路径方向投影 > 0 (机器人已投影过该点)
+            double seg_dx = path_[nearest_index_ + 1].x - path_[nearest_index_].x;
+            double seg_dy = path_[nearest_index_ + 1].y - path_[nearest_index_].y;
+            double to_robot_x = current.x - path_[nearest_index_].x;
+            double to_robot_y = current.y - path_[nearest_index_].y;
+            bool cond1 = (seg_dx * to_robot_x + seg_dy * to_robot_y > 0.0);
+
+            // 条件2: 路径点在车身后方 (点在车辆朝向的负方向)
+            double to_pt_x = path_[nearest_index_].x - current.x;
+            double to_pt_y = path_[nearest_index_].y - current.y;
+            bool cond2 = (cos_h * to_pt_x + sin_h * to_pt_y < 0.0);
+
+            if (cond1 || cond2) {
+                self->nearest_index_++;
+            } else {
+                break;
+            }
         }
     }
 

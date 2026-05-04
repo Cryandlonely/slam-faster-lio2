@@ -162,6 +162,7 @@ SlamNavNode::SlamNavNode(const rclcpp::NodeOptions& options)
         [this]() {
             PublishStatus();
             PublishCurrentPose();
+            PublishTF();
             PublishActualTrajectory();
             PublishPath();
             PublishGoalMarker();
@@ -270,12 +271,13 @@ void SlamNavNode::DeclareAndLoadParams() {
     this->declare_parameter<double>("tracking.cmd_filter_alpha", tp.cmd_filter_alpha);
     this->declare_parameter<double>("tracking.heading_align_threshold", 30.0);  // 度
     this->declare_parameter<double>("tracking.max_accel", tp.max_accel);
+    this->declare_parameter<double>("tracking.corner_min_speed", tp.corner_min_speed);
     tp.lookahead_distance   = this->get_parameter("tracking.lookahead_distance").as_double();
     tp.min_lookahead        = this->get_parameter("tracking.min_lookahead").as_double();
     tp.max_lookahead        = this->get_parameter("tracking.max_lookahead").as_double();
     tp.lookahead_gain       = this->get_parameter("tracking.lookahead_gain").as_double();
     tp.goal_tolerance       = this->get_parameter("tracking.goal_tolerance").as_double();
-    tp.heading_tolerance    = this->get_parameter("tracking.heading_tolerance").as_double();
+    tp.heading_tolerance    = this->get_parameter("tracking.heading_tolerance").as_double() * M_PI / 180.0;  // 度→弧度
     tp.max_linear_x         = this->get_parameter("tracking.max_linear_x").as_double();
     tp.max_linear_y         = this->get_parameter("tracking.max_linear_y").as_double();
     tp.max_angular_velocity = this->get_parameter("tracking.max_angular_velocity").as_double();
@@ -284,7 +286,10 @@ void SlamNavNode::DeclareAndLoadParams() {
     tp.cmd_filter_alpha     = this->get_parameter("tracking.cmd_filter_alpha").as_double();
     tp.heading_align_threshold = this->get_parameter("tracking.heading_align_threshold").as_double() * M_PI / 180.0;  // 度→弧度
     tp.max_accel            = this->get_parameter("tracking.max_accel").as_double();
+    tp.corner_min_speed     = this->get_parameter("tracking.corner_min_speed").as_double();
     tp.control_dt           = (control_rate_ > 0.0) ? (1.0 / control_rate_) : 0.05;
+    tp.slow_down_dist       = this->get_parameter("planning.slow_down_dist").as_double();
+    tp.min_speed            = this->get_parameter("planning.min_speed").as_double();
     tracker_.SetParams(tp);
 
     // -- SDK 接口参数 --
@@ -1122,7 +1127,7 @@ void SlamNavNode::PublishTrackingDebug() {
 void SlamNavNode::PublishControlCmd(const SdkControlMsg& sdk_msg) {
     auto twist = geometry_msgs::msg::Twist();
     twist.linear.x  = sdk_msg.vx;
-    twist.linear.y  = sdk_msg.vy;
+    twist.linear.y  = 0.0;  // 履带车不支持横向运动, 强制为 0
     twist.angular.z = sdk_msg.yaw_rate;
     cmd_vel_pub_->publish(twist);
 }

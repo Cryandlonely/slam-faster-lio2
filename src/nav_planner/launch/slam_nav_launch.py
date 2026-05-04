@@ -3,15 +3,9 @@
 SLAM 导航模块启动文件
 
 启动:
-  1. slam_nav_node - 导航规划+跟踪节点 (通过 TF 获取底盘位姿, 发布 /cmd_vel)
-  2. static_transform - body → base_link 静态TF (雷达到底盘中心的安装偏移补偿)
-
-TF 链:
-  map → camera_init (transform_fusion.py 发布)
-    → body            (FAST_LIO 发布)
-      → base_link     (本文件的静态 TF)
-
-nav_planner 通过 TF 查询 map → base_link 得到底盘中心在地图中的位姿。
+  1. rtk_node      - RTK 串口读取 + 发布 /outdoor/odom
+  2. slam_nav_node  - 导航规划+跟踪节点 (GPS模式直接订阅 /outdoor/odom)
+  3. static_transform - body → base_link / body → livox_frame 静态TF
 """
 
 import os
@@ -21,21 +15,32 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    config = os.path.join(
+    nav_config = os.path.join(
         get_package_share_directory('nav_planner'),
         'config',
         'slam_nav_params.yaml')
+
+    rtk_config = os.path.join(
+        get_package_share_directory('rtk'),
+        'config',
+        'rtk_params.yaml')
+
+    rtk_node = Node(
+        package='rtk',
+        executable='rtk_node',
+        name='rtk_node',
+        output='screen',
+        parameters=[rtk_config],
+    )
 
     slam_nav_node = Node(
         package='nav_planner',
         executable='slam_nav_node',
         name='slam_nav_node',
         output='screen',
-        parameters=[config],
+        parameters=[nav_config],
     )
 
-    # 雷达(body)安装在底盘中心(base_link)前方 0.4m 处
-    # body → base_link: base_link 在 body 的后方 0.4m, 即 x=-0.4
     static_tf_body_to_base = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
@@ -43,8 +48,6 @@ def generate_launch_description():
         output='screen',
     )
 
-    # Livox 驱动将点云 frame_id 设为 livox_frame, 而 FAST_LIO 的 body 帧即为雷达位置
-    # 发布 body → livox_frame 的 identity 静态 TF, 使 livox_frame 接入 TF 树
     static_tf_body_to_livox = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
@@ -55,5 +58,6 @@ def generate_launch_description():
     return LaunchDescription([
         static_tf_body_to_base,
         static_tf_body_to_livox,
+        rtk_node,
         slam_nav_node,
     ])

@@ -21,7 +21,8 @@ bridge_node:
 
     # ==================== 节点生命周期管理 ====================
     # ROS2 工作区路径 (用于子进程 source setup.bash, 留空则继承当前环境)
-    ros2_workspace: "/home/lonely/slam/slam-faster-lio2"
+    # 注意: 不同机器路径不同, 留空时子进程继承父进程已 source 的环境 (推荐)
+    ros2_workspace: ""
 
     # 建图 launch 使用的配置文件名 (在 location/config/ 目录下)
     mapping_config_file: "mid360.yaml"
