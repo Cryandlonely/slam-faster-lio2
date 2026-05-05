@@ -15,10 +15,8 @@ find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
-find_package(tf2_geometry_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(nlohmann_json REQUIRED)
-find_package(livox_ros_driver2 REQUIRED)
 
 # ---- 头文件 ----
 include_directories(include)
@@ -26,7 +24,6 @@ include_directories(include)
 # ---- 核心库 (四模块 + 公共) ----
 add_library(slam_nav_core SHARED
   src/point_to_point_planner.cpp
-  src/astar_planner.cpp
   src/pure_pursuit_tracker.cpp
   src/robot_sdk_interface.cpp
   src/navigation_state_machine.cpp
@@ -52,9 +49,7 @@ ament_target_dependencies(slam_nav_node
   geometry_msgs
   std_msgs
   tf2_ros
-  tf2_geometry_msgs
   visualization_msgs
-  livox_ros_driver2
 )
 
 # ---- 安装 ----

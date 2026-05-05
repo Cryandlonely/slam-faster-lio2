@@ -9,6 +9,3 @@ chassis_node:
     max_vx: 2.0       # 最大前进速度 (m/s)
     max_vy: 2.0       # 最大横移速度 (m/s)
     max_vz: 1.0       # 最大角速度   (rad/s)
-
-    # 安全看门狗: /cmd_vel 超过此时间未更新则自动急停
-    watchdog_timeout: 0.5  # 秒

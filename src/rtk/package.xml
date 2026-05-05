@@ -4,7 +4,7 @@
   <name>rtk</name>
   <version>0.0.0</version>
   <description>RTK GPS串口接收与NMEA解析节点</description>
-  <maintainer email="3416351474@qq.com">lonely</maintainer>
+  <maintainer email="3416351474@qq.com">zt</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>

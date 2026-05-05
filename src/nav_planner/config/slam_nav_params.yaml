@@ -1,73 +1,56 @@
-# SLAM 导航规划节点参数配置 — 室外GPS履带车模式
+# SLAM 导航规划节点参数配置 — 室外GPS万向轮底盘模式
+# 基于 207_ws nav_planner_params.yaml 重写
 
 slam_nav_node:
   ros__parameters:
 
-    nav:
-      mode: "gps"
+    # ---- 定位源 ----
+    odom_topic: "/outdoor/odom"    # RTK+INS 融合里程计话题
 
-    # RTK 室外定位源
-    outdoor:
-      odom_topic: "/outdoor/odom"
-      ref_latitude: 36.66111
-      ref_longitude: 117.01665
+    # ---- GPS 参考原点 (局部坐标系原点) ----
+    reference:
+      latitude: 36.66111
+      longitude: 117.01665
 
-    # SLAM 定位源 (备用, GPS模式不启用)
-    slam:
-      odom_topic: "/Odometry"
-      map_frame: "map"
-      base_frame: "body"
+    # ---- 坐标系 ----
+    frame:
+      map: "map"
+      base: "body"
 
-    # 规划参数
+    # ---- 规划参数 ----
     planning:
-      use_astar: false               # 室外直线规划
-      path_resolution: 0.5           # 路径点间距 (m)
-      target_speed: 1.5              # 目标速度 (m/s)
-      slow_down_dist: 4.0            # 终点减速区距离 (m)
-      min_speed: 0.2                 # 减速区最低速度 (m/s)
+      path_resolution: 0.5    # 路径点间距 (m), GPS模式适当放大
+      target_speed: 1.5       # 默认目标速度 (m/s)
+      slow_down_dist: 1.5     # 减速区距离 (m); 到达 goal_tolerance 边界时速度约 0.53 m/s, 不会蠕行
+      min_speed: 0.2         # 减速区最低速度 (m/s)
 
-    # 跟踪参数
+    # ---- 跟踪参数 (GPS精度 ±0.3~0.5m 适配) ----
     tracking:
-      lookahead_distance: 0.6
-      min_lookahead: 0.2
-      max_lookahead: 2.0
-      lookahead_gain: 0.3
-      goal_tolerance: 0.5            # 到达判定阈值 (m)
-      heading_tolerance: 180.0       # 到达后不对齐朝向
-      max_linear_x: 1.5              # 最大前进速度 (m/s)
+      lookahead_distance: 1.2         # 前视距离基础值 (m)
+      min_lookahead: 0.5              # 最小前视距离 (m)
+      max_lookahead: 5.0              # 最大前视距离 (m)
+      lookahead_gain: 1.0             # 速度增益
+      goal_tolerance: 0.5             # 到达判定阈值 (m), GPS精度适配
+      heading_tolerance: 15.0        # 最终朝向阈值 (度), 180=不对齐
+      max_linear_x: 1.5               # 最大前进速度 (m/s)
+      max_linear_y: 0.0               # 最大侧移速度 (m/s), 履带车无横向移动
       max_angular_velocity: 1.0      # 最大角速度 (rad/s)
-      heading_kp: 0.8
-      cte_kp: 0.3
-      cmd_filter_alpha: 0.6
-      heading_align_threshold: 15.0  # 起步导向对齐阈值 (度)
-      max_accel: 1.0                 # 最大加速度 (m/s²); <=0 禁用
-      corner_min_speed: 0.1          # 转弯最低速度 (m/s); 0=禁用
+      heading_kp: 1.0                 # 航向 P 控制增益
+      cte_kp: 0.3                     # 横向跟踪误差增益 (降低避免 GPS 噪声引起蛇形)
+      cte_dead_zone: 0.3              # CTE 死区 (m); 应 ≥ GPS 定位精度, 防噪声触发纠偏
+      cmd_filter_alpha: 0.3           # 低通滤波系数 (0.3响应快)
+      heading_align_threshold: 15.0   # 起步航向对齐阈值 (度)
 
+    # ---- 控制频率 ----
     control:
-      rate: 10.0                     # 控制频率 (Hz)
+      rate: 10.0
 
-    # SDK 接口
+    # ---- SDK 接口 ----
     sdk:
       max_vx: 1.5
-      max_vy: 2.0
+      max_vy: 0.0        # 履带车无横向移动
       max_yaw_rate: 1.0
 
-    # 动态避障
-    obstacle:
-      enable: true
-      lidar_topic: "/livox/lidar"
-      lidar_frame: "livox_frame"
-      z_min: 0.15
-      z_max: 2.0
-      fov_half_deg: 90.0
-      dynamic_ttl: 3.0
-      replan_lookahead: 3.0
-      replan_cooldown: 2.0
-      lidar_subsample: 5
-      corridor_width: 0.6
-      gps_avoidance: true
-      detour_lateral: 1.5
-      detour_forward: 1.5
-
+    # ---- 调试 ----
     debug:
       status_rate: 10.0

@@ -28,9 +28,6 @@ private:
     // 底盘反馈回调 (串口后台线程 → ROS2 发布)
     void OnChassisFeedback(const ChassisSerial::FeedbackData& fb);
 
-    // 安全看门狗: cmd_vel 超时未收到则急停
-    void WatchdogCallback();
-
     // 发布反馈数据
     void PublishFeedback(const ChassisSerial::FeedbackData& fb);
 
@@ -46,20 +43,14 @@ private:
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr feedback_pub_;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr motor_status_pub_;
 
-    // 看门狗定时器
-    rclcpp::TimerBase::SharedPtr watchdog_timer_;
-
     // 参数
     std::string serial_port_ = "/dev/ttyUSB0";
     double max_vx_     = 1.0;   // m/s
     double max_vy_     = 0.8;   // m/s
     double max_vz_     = 1.0;   // rad/s
-    double watchdog_timeout_ = 0.5;  // 秒
 
     // 状态
     std::mutex mutex_;
-    rclcpp::Time last_cmd_time_;
-    bool cmd_received_ = false;
 };
 
 }  // namespace chassis

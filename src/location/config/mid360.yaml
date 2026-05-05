@@ -15,12 +15,12 @@
 
 /global_map_publisher:
     ros__parameters:
-        map_file_path: "/home/lonely/slam/slam-faster-lio2/src/location/PCD/scans.pcd"
+        map_file_path: "/home/zt/slam/slam-faster-lio2/src/location/PCD/scans.pcd"
         interval: 5 # publish interval in seconds
 
 /**:
     ros__parameters:
-        map_file_path: "/home/lonely/slam/slam-faster-lio2/src/location/PCD/scans.pcd"
+        map_file_path: "/home/zt/slam/slam-faster-lio2/src/location/PCD/scans.pcd"
         feature_extract_enable: false
         point_filter_num: 1              # 保留所有点，建图/定位更密集
         max_iteration: 5                 # EKF迭代次数 3→5，精度更高

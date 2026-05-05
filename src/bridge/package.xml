@@ -4,7 +4,7 @@
   <name>bridge</name>
   <version>1.0.0</version>
   <description>对外通讯桥接模块 — TCP JSON 接口, 接收导航指令/推送系统状态</description>
-  <maintainer email="lonely@dev.com">lonely</maintainer>
+  <maintainer email="zt@dev.com">zt</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>

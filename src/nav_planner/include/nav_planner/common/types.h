@@ -37,23 +37,18 @@ struct Waypoint {
 
 // ==================== 控制量 ====================
 
-/// 万向轮底盘中间控制量
+/// 底盘中间控制量
 struct OmniControlCmd {
     double vx       = 0.0;  // 前进速度 (m/s), 正值前进
-    double vy       = 0.0;  // 横移速度 (m/s), 正值左移
+    double vy       = 0.0;  // 横移速度 (m/s); 履带车始终为 0
     double yaw_rate = 0.0;  // 偏航角速度 (rad/s), 正值逆时针
 };
 
-/// SDK 控制消息 (完整字段)
+/// SDK 控制消息
 struct SdkControlMsg {
-    double  vx          = 0.0;   // m/s, 正值前进
-    double  vy          = 0.0;   // m/s, 正值左移
-    double  yaw_rate    = 0.0;   // rad/s, 正值逆时针
-    int8_t  mode        = 3;     // 默认站立模式 (3=stand)
-    double  roll        = 0.0;
-    double  pitch       = 0.0;
-    double  yaw         = 0.0;
-    double  height_rate = 0.0;
+    double vx       = 0.0;  // m/s, 正值前进
+    double vy       = 0.0;  // m/s; 履带车始终为 0
+    double yaw_rate = 0.0;  // rad/s, 正值逆时针
 };
 
 // ==================== 导航状态 ====================

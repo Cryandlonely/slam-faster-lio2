@@ -10,26 +10,22 @@
 
 namespace slam_nav {
 
-/// 跟踪参数 (默认值针对室内SLAM精度优化)
+/// 跟踪参数 (默认值针对 GPS/RTK 精度优化，源自 207_ws)
 struct TrackerParams {
-    double lookahead_distance   = 0.8;   // 前视距离 (m), 室内环境缩短
-    double min_lookahead        = 0.2;   // 最小前视距离 (m)
-    double max_lookahead        = 3.0;   // 最大前视距离 (m)
-    double lookahead_gain       = 1.0;   // 前视距离速度增益
-    double goal_tolerance       = 0.10;  // 到达判定阈值 (m), SLAM精度适配
-    double heading_tolerance    = 0.15;  // 航向到达阈值 (rad, ~8.6°)
-    double max_linear_x         = 1.0;   // 最大前进速度 (m/s), 室内安全限速
-    double max_linear_y         = 0.8;   // 最大横移速度 (m/s)
+    double lookahead_distance   = 1.2;   // 前视距离 (m)
+    double min_lookahead        = 0.3;   // 最小前视距离 (m)
+    double max_lookahead        = 5.0;   // 最大前视距离 (m)
+    double lookahead_gain       = 1.2;   // 前视距离速度增益
+    double goal_tolerance       = 0.5;   // 到达判定阈值 (m), GPS精度适配
+    double heading_tolerance    = 0.15;  // 航向到达阈值 (rad, ~8.6°), yaml 以度输入由节点换算
+    double max_linear_x         = 1.5;   // 最大前进速度 (m/s)
+    double max_linear_y         = 1.5;   // 最大横移速度 (m/s)
     double max_angular_velocity = 1.0;   // 最大角速度 (rad/s)
     double heading_kp           = 1.5;   // 航向 P 控制增益
-    double cte_kp               = 1.0;   // 横向纠偏增益
-    double cmd_filter_alpha     = 0.3;   // 指令低通滤波系数
-    double heading_align_threshold = 0.524; // 航向对齐阈值 (rad)。配置文件输入度数，slam_nav_node 踏入时自动换算为弧度
-    double max_accel            = 1.0;   // 最大线加速度 (m/s²), 限制起步/转弯时的速度突变; <=0 禁用
-    double control_dt           = 0.05;  // 控制周期 (s), 由 control.rate 决定
-    double slow_down_dist       = 2.0;   // 末段减速区距离 (m), 实时用 dist_to_goal 计算
-    double min_speed            = 0.3;   // 减速区最低速度 (m/s)
-    double corner_min_speed     = 0.0;   // 转弯减速最低速度 (m/s); >0 时启用: 航向误差0°→全速, 90°→此值
+    double cte_kp               = 0.5;   // 横向纠偏增益
+    double cte_dead_zone        = 0.3;   // CTE 死区 (m); 应 ≥ 定位精度, GPS 建议 0.3m
+    double cmd_filter_alpha     = 0.3;   // 低通滤波系数
+    double heading_align_threshold = 0.785;  // 航向对齐阈值 (rad, ~45°), yaml 以度输入由节点换算
 };
 
 /// Pure Pursuit 轨迹跟踪器 (万向轮底盘适配)

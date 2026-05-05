@@ -48,17 +48,9 @@ ChassisNode::ChassisNode(const rclcpp::NodeOptions& options)
     feedback_pub_     = this->create_publisher<std_msgs::msg::String>("/chassis/feedback", 10);
     motor_status_pub_ = this->create_publisher<std_msgs::msg::Bool>("/chassis/motor_stopped", 10);
 
-    // ---- 看门狗: cmd_vel 超时急停 ----
-    last_cmd_time_ = this->now();
-    auto wd_period = std::chrono::duration<double>(watchdog_timeout_ / 2.0);
-    watchdog_timer_ = this->create_wall_timer(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(wd_period),
-        std::bind(&ChassisNode::WatchdogCallback, this));
-
     RCLCPP_INFO(this->get_logger(), "ChassisNode 初始化完成");
     RCLCPP_INFO(this->get_logger(), "  串口: %s", serial_port_.c_str());
     RCLCPP_INFO(this->get_logger(), "  速度限幅: vx=%.1f vy=%.1f vz=%.1f", max_vx_, max_vy_, max_vz_);
-    RCLCPP_INFO(this->get_logger(), "  看门狗超时: %.2f s", watchdog_timeout_);
     RCLCPP_INFO(this->get_logger(), "  订阅: /cmd_vel");
     RCLCPP_INFO(this->get_logger(), "  发布: /chassis/imu, /chassis/battery, /chassis/feedback, /chassis/motor_stopped");
 }
@@ -76,20 +68,15 @@ void ChassisNode::DeclareAndLoadParams() {
     this->declare_parameter<double>("max_vx", 1.0);
     this->declare_parameter<double>("max_vy", 0.8);
     this->declare_parameter<double>("max_vz", 1.0);
-    this->declare_parameter<double>("watchdog_timeout", 0.5);
 
-    serial_port_      = this->get_parameter("serial_port").as_string();
-    max_vx_           = this->get_parameter("max_vx").as_double();
-    max_vy_           = this->get_parameter("max_vy").as_double();
-    max_vz_           = this->get_parameter("max_vz").as_double();
-    watchdog_timeout_ = this->get_parameter("watchdog_timeout").as_double();
+    serial_port_ = this->get_parameter("serial_port").as_string();
+    max_vx_      = this->get_parameter("max_vx").as_double();
+    max_vy_      = this->get_parameter("max_vy").as_double();
+    max_vz_      = this->get_parameter("max_vz").as_double();
 }
 
 void ChassisNode::CmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg) {
     std::lock_guard<std::mutex> lock(mutex_);
-
-    last_cmd_time_ = this->now();
-    cmd_received_ = true;
 
     // 限幅 (m/s, rad/s)
     double vx = std::clamp(msg->linear.x,  -max_vx_, max_vx_);
@@ -110,20 +97,6 @@ void ChassisNode::CmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
 void ChassisNode::OnChassisFeedback(const ChassisSerial::FeedbackData& fb) {
     // 此回调在串口后台线程中调用, 需要线程安全地发布
     PublishFeedback(fb);
-}
-
-void ChassisNode::WatchdogCallback() {
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    if (!cmd_received_) return;
-
-    auto elapsed = (this->now() - last_cmd_time_).seconds();
-    if (elapsed > watchdog_timeout_) {
-        serial_->stop();
-        cmd_received_ = false;
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
-            "cmd_vel 超时 (%.2fs), 已急停", elapsed);
-    }
 }
 
 void ChassisNode::PublishFeedback(const ChassisSerial::FeedbackData& fb) {

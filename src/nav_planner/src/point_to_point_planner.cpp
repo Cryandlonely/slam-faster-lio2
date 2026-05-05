@@ -48,9 +48,10 @@ bool PointToPointPlanner::Plan(const Pose2D& current, const Pose2D& goal, bool i
         if (is_final) {
             double dist_to_end = total_dist * (1.0 - t);
             if (dist_to_end < params_.slow_down_dist && params_.slow_down_dist > kEpsilon) {
+                // 以 min_speed 为下限线性减速，避免速度降至 0 导致机器人在终点前停顿
                 double ratio = dist_to_end / params_.slow_down_dist;
                 wp.target_speed = params_.min_speed +
-                                  ratio * (params_.target_speed - params_.min_speed);
+                                   ratio * (params_.target_speed - params_.min_speed);
             } else {
                 wp.target_speed = params_.target_speed;
             }
@@ -117,7 +118,7 @@ bool PointToPointPlanner::PlanMulti(const Pose2D& current,
             wp.x = seg_end.x;
             wp.y = seg_end.y;
             wp.yaw = seg_end.yaw;
-            wp.target_speed = is_last_seg ? 0.0 : params_.target_speed;
+            wp.target_speed = is_last_seg ? params_.min_speed : params_.target_speed;
             path_.push_back(wp);
             accumulated_dist += seg_dist;
             seg_start = seg_end;
@@ -159,8 +160,8 @@ bool PointToPointPlanner::PlanMulti(const Pose2D& current,
     }
 
     // ── 转弯预减速后处理 ────────────────────────────────────────────────────
-    // 扫描路径中的方向突变点 (拐角), 在拐角前 slow_down_dist 内线性降速,
-    // 使车辆在到达拐角之前就已减速到安全速度, 避免高速冲过拐角后丢失直线。
+    // 扫描路径中的方向突变点 (拐角/中间航点), 在拐角前 slow_down_dist 内线性降速,
+    // 使车辆在到达拐角之前就已减速到安全速度, 避免高速冲过拐角。
     {
         const double kCornerThresh = 20.0 * M_PI / 180.0;   // ≥20° 触发预减速
         const int sz = static_cast<int>(path_.size());

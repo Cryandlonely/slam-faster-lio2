@@ -4,7 +4,7 @@
   <name>chassis</name>
   <version>1.0.0</version>
   <description>履带车底盘 CAN 控制 ROS2 节点 — 订阅 /cmd_vel 并通过 SocketCAN 控制底盘</description>
-  <maintainer email="lonely@dev.com">lonely</maintainer>
+  <maintainer email="zt@dev.com">zt</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
