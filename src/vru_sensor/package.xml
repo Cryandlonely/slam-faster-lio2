@@ -4,7 +4,7 @@
   <name>vru_sensor</name>
   <version>1.0.0</version>
   <description>VRU620/621PRC-232 倾角传感器驱动 — RS232 串口读取，发布姿态角数据</description>
-  <maintainer email="lonely@dev.com">lonely</maintainer>
+  <maintainer email="zt@dev.com">zt</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>

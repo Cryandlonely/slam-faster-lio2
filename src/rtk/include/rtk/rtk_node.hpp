@@ -3,9 +3,12 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <std_msgs/msg/float64.hpp>
+#include <std_msgs/msg/string.hpp>
+#include <nlohmann/json.hpp>
 
 #include <string>
 #include <vector>
@@ -132,6 +135,19 @@ struct GpsData
     bool     heading_valid   = false;  // 航向数据是否有效
 };
 
+// ==================== EKF 状态 (GPS + IMU 融合) ====================
+// 状态向量: [x, y, yaw, vx]  (ENU 坐标, m/rad/m/s)
+struct EkfState {
+    double x   = 0.0;    // 东向位置 (m)
+    double y   = 0.0;    // 北向位置 (m)
+    double yaw = 0.0;    // ENU 航向 (rad, [-π,π])
+    double vx  = 0.0;    // 前向速度 (m/s)
+    // 4×4 协方差矩阵 (行主序)
+    double P[16] = {5.0,0,0,0, 0,5.0,0,0, 0,0,1.0,0, 0,0,0,1.0};
+    bool   initialized = false;
+    rclcpp::Time last_predict_stamp{0, 0, RCL_ROS_TIME};
+};
+
 // ==================== RTK 节点类 ====================
 
 class RtkNode : public rclcpp::Node
@@ -146,6 +162,13 @@ private:
     void serialReadThread();   // 接收并解析 Unicore 二进制数据
     void publishGpsData();
     void timerCallback();
+    void ImuCallback(const sensor_msgs::msg::Imu::SharedPtr msg);          // VRU IMU 回调
+    void ChassisFeedbackCallback(const std_msgs::msg::String::SharedPtr msg); // 底盘速度回调
+
+    // EKF 方法
+    void EkfPredict(double gz, double dt);                    // 用陀螺仪预测
+    void EkfUpdatePos(double x_gps, double y_gps, double r); // GPS 位置更新
+    void EkfUpdateYaw(double yaw_gps, double r_yaw);          // GPS 航向更新
 
     // 将经纬度转换为相对济南参考点的局部 ENU 坐标 (米)
     void convertToLocalEnu(double lat, double lon,
@@ -178,6 +201,14 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr          outdoor_odom_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr            heading_pub_;   // 航向话题 (ENU yaw, rad)
     rclcpp::TimerBase::SharedPtr timer_;
+
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr        imu_sub_;            // VRU IMU 订阅
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr         chassis_feedback_sub_; // 底盘速度订阅
+
+    // EKF 融合状态
+    EkfState    ekf_;
+    std::mutex  ekf_mutex_;
+    double      chassis_vx_ = 0.0;  // 底盘真实轮速 (m/s, 无锁读写)
 };
 
 }  // namespace rtk

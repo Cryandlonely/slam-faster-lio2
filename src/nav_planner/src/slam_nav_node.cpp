@@ -18,6 +18,7 @@
 #include <sstream>
 #include <nlohmann/json.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <geometry_msgs/msg/point.hpp>
 
 using namespace std::chrono_literals;
 
@@ -58,6 +59,10 @@ SlamNavNode::SlamNavNode(const rclcpp::NodeOptions& options)
         "/nav_pause", 10,
         std::bind(&SlamNavNode::NavPauseCallback, this, std::placeholders::_1));
 
+    chassis_feedback_sub_ = this->create_subscription<std_msgs::msg::String>(
+        "/chassis/feedback", 10,
+        std::bind(&SlamNavNode::ChassisFeedbackCallback, this, std::placeholders::_1));
+
     // ---- 发布 ----
     path_pub_           = this->create_publisher<nav_msgs::msg::Path>("/planned_path", 10);
     status_pub_         = this->create_publisher<std_msgs::msg::String>("/nav_status", 10);
@@ -68,6 +73,7 @@ SlamNavNode::SlamNavNode(const rclcpp::NodeOptions& options)
     robot_enable_pub_   = this->create_publisher<std_msgs::msg::Bool>("/robot_enable", 10);
     actual_trajectory_pub_ = this->create_publisher<nav_msgs::msg::Path>("/actual_trajectory", 10);
     goal_marker_pub_    = this->create_publisher<visualization_msgs::msg::Marker>("/goal_marker", 10);
+    planned_route_marker_pub_ = this->create_publisher<visualization_msgs::msg::Marker>("/planned_route_marker", 10);
 
     actual_trajectory_.header.frame_id = map_frame_;
 
@@ -88,6 +94,7 @@ SlamNavNode::SlamNavNode(const rclcpp::NodeOptions& options)
             PublishActualTrajectory();
             PublishPath();
             PublishGoalMarker();
+            PublishPlannedRouteMarker();
         });
 
     RCLCPP_INFO(this->get_logger(), "SlamNavNode 初始化完成");
@@ -277,6 +284,19 @@ void SlamNavNode::NavPauseCallback(
     }
 }
 
+void SlamNavNode::ChassisFeedbackCallback(
+    const std_msgs::msg::String::SharedPtr msg) {
+    // 解析 JSON: {"vx": 0.5, "vy": 0.0, ...}
+    // 只取 |vx| 作为实际线速, 无锁直接写入 (double 写入是原子的)
+    try {
+        auto j = nlohmann::json::parse(msg->data);
+        double vx = j.value("vx", 0.0);
+        actual_chassis_speed_ = std::abs(vx);
+    } catch (...) {
+        // 解析失败时保持上一个平切値
+    }
+}
+
 // ==================== 多航点队列 ====================
 
 void SlamNavNode::NavWaypointsCallback(
@@ -418,6 +438,7 @@ void SlamNavNode::ControlLoop() {
 
         case NavState::TRACKING: {
             OmniControlCmd cmd;
+            tracker_.SetActualSpeed(actual_chassis_speed_);  // 底盘实际速度优先于指令速度
             bool tracking = tracker_.ComputeControl(current_pose_, cmd);
 
             if (!tracking) {
@@ -593,9 +614,16 @@ void SlamNavNode::PublishTF() {
 void SlamNavNode::PublishActualTrajectory() {
     if (!odom_received_) return;
 
+    // 仅在导航跟踪阶段记录轨迹，避免静止等待时的定位微抖动画出回环。
+    if (state_machine_.GetState() != NavState::TRACKING) {
+        actual_trajectory_.header.stamp = this->now();
+        actual_trajectory_pub_->publish(actual_trajectory_);
+        return;
+    }
+
     double dx = current_pose_.x - last_traj_x_;
     double dy = current_pose_.y - last_traj_y_;
-    if (dx * dx + dy * dy > 0.0025) {  // 5cm 门限
+    if (dx * dx + dy * dy > 0.01) {  // 10cm 门限, 降低轨迹点密度减轻 RViz 负载
         geometry_msgs::msg::PoseStamped ps;
         ps.header.stamp = this->now();
         ps.header.frame_id = map_frame_;
@@ -613,10 +641,10 @@ void SlamNavNode::PublishActualTrajectory() {
         last_traj_x_ = current_pose_.x;
         last_traj_y_ = current_pose_.y;
 
-        if (actual_trajectory_.poses.size() > 5000) {
+        if (actual_trajectory_.poses.size() > 2000) {
             actual_trajectory_.poses.erase(
                 actual_trajectory_.poses.begin(),
-                actual_trajectory_.poses.begin() + 1000);
+            actual_trajectory_.poses.begin() + 500);
         }
     }
 
@@ -657,6 +685,41 @@ void SlamNavNode::PublishGoalMarker() {
     marker.lifetime = rclcpp::Duration(0, 0);
 
     goal_marker_pub_->publish(marker);
+}
+
+void SlamNavNode::PublishPlannedRouteMarker() {
+    auto marker = visualization_msgs::msg::Marker();
+    marker.header.stamp = this->now();
+    marker.header.frame_id = map_frame_;
+    marker.ns = "planned_route";
+    marker.id = 0;
+
+    if (!planner_.HasValidPath()) {
+        marker.action = visualization_msgs::msg::Marker::DELETE;
+        planned_route_marker_pub_->publish(marker);
+        return;
+    }
+
+    marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
+    marker.action = visualization_msgs::msg::Marker::ADD;
+    marker.pose.orientation.w = 1.0;
+    marker.scale.x = 0.12;
+    marker.color.r = 0.0f;
+    marker.color.g = 1.0f;
+    marker.color.b = 0.2f;
+    marker.color.a = 1.0f;
+    marker.lifetime = rclcpp::Duration(0, 0);
+
+    marker.points.reserve(planner_.GetPath().size());
+    for (const auto& wp : planner_.GetPath()) {
+        geometry_msgs::msg::Point p;
+        p.x = wp.x;
+        p.y = wp.y;
+        p.z = 0.08;
+        marker.points.push_back(p);
+    }
+
+    planned_route_marker_pub_->publish(marker);
 }
 
 // ==================== 状态机回调 ====================

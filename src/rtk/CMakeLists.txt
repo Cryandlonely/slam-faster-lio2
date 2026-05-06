@@ -16,6 +16,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(nlohmann_json REQUIRED)
 
 # 添加头文件目录
 include_directories(include)
@@ -31,6 +32,7 @@ ament_target_dependencies(rtk_node
   geometry_msgs
   nav_msgs
 )
+target_link_libraries(rtk_node nlohmann_json::nlohmann_json)
 
 # 安装可执行文件
 install(TARGETS

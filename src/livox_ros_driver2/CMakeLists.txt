@@ -282,6 +282,13 @@ else(ROS_EDITION STREQUAL "ROS2")
   target_include_directories(${PROJECT_NAME} PRIVATE ${livox_sdk_INCLUDE_DIRS})
 
   # get include directories of custom msg headers
+  # 自动探测 ROS_DISTRO: humble 及以后版本使用 rosidl_get_typesupport_target()
+  if(NOT DEFINED HUMBLE_ROS)
+    if(DEFINED ENV{ROS_DISTRO} AND "$ENV{ROS_DISTRO}" STREQUAL "humble")
+      set(HUMBLE_ROS "humble")
+    endif()
+  endif()
+
   if(HUMBLE_ROS STREQUAL "humble")
     rosidl_get_typesupport_target(cpp_typesupport_target
     ${LIVOX_INTERFACES} "rosidl_typesupport_cpp")

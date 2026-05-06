@@ -42,6 +42,8 @@ RtkNode::RtkNode(const rclcpp::NodeOptions& options)
     this->declare_parameter<int>("baud_rate", 115200);
     this->declare_parameter<double>("publish_rate", 10.0);
     this->declare_parameter<std::string>("outdoor_odom_topic", "/outdoor/odom");
+    this->declare_parameter<std::string>("imu_topic", "/vru/imu_raw");
+    this->declare_parameter<std::string>("chassis_feedback_topic", "/chassis/feedback");
     // 济南参考基准点 (WGS84 度)
     this->declare_parameter<double>("reference.jinan_lat", 36.66111);
     this->declare_parameter<double>("reference.jinan_lon", 117.01665);
@@ -54,6 +56,8 @@ RtkNode::RtkNode(const rclcpp::NodeOptions& options)
     baud_rate_ = this->get_parameter("baud_rate").as_int();
     double publish_rate = this->get_parameter("publish_rate").as_double();
     outdoor_odom_topic_ = this->get_parameter("outdoor_odom_topic").as_string();
+    std::string imu_topic              = this->get_parameter("imu_topic").as_string();
+    std::string chassis_feedback_topic  = this->get_parameter("chassis_feedback_topic").as_string();
     ref_lat_ = this->get_parameter("reference.jinan_lat").as_double();
     ref_lon_ = this->get_parameter("reference.jinan_lon").as_double();
     antenna_heading_offset_deg_ = this->get_parameter("antenna_heading_offset_deg").as_double();
@@ -71,6 +75,18 @@ RtkNode::RtkNode(const rclcpp::NodeOptions& options)
     odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("rtk/odom", 10);
     outdoor_odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>(outdoor_odom_topic_, 10);
     heading_pub_ = this->create_publisher<std_msgs::msg::Float64>("rtk/heading", 10);
+
+    // 订阅 VRU IMU 用于 EKF 预测 (陀螺仪 gz → 偏航角速率)
+    imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
+        imu_topic, 50,
+        std::bind(&RtkNode::ImuCallback, this, std::placeholders::_1));
+    RCLCPP_INFO(this->get_logger(), "IMU 融合话题: %s", imu_topic.c_str());
+
+    // 订阅底盘速度反馈 (轮速替换 GPS 差分 vx)
+    chassis_feedback_sub_ = this->create_subscription<std_msgs::msg::String>(
+        chassis_feedback_topic, 10,
+        std::bind(&RtkNode::ChassisFeedbackCallback, this, std::placeholders::_1));
+    RCLCPP_INFO(this->get_logger(), "底盘反馈话题: %s", chassis_feedback_topic.c_str());
     
     // 预分配二进制缓冲区
     binary_buffer_.reserve(4096);
@@ -188,6 +204,146 @@ void RtkNode::closeSerial()
         close(serial_fd_);
         serial_fd_ = -1;
     }
+}
+
+// ==================== EKF 实现 ====================
+
+void RtkNode::ImuCallback(const sensor_msgs::msg::Imu::SharedPtr msg)
+{
+    std::lock_guard<std::mutex> lk(ekf_mutex_);
+    if (!ekf_.initialized) return;
+
+    rclcpp::Time stamp(msg->header.stamp);
+    double dt = (stamp - ekf_.last_predict_stamp).seconds();
+    if (dt <= 0.0 || dt > 0.5) {
+        ekf_.last_predict_stamp = stamp;
+        return;
+    }
+    EkfPredict(msg->angular_velocity.z, dt);
+    ekf_.last_predict_stamp = stamp;
+}
+
+// 预测步骤：常速度模型 + 陀螺仪偏航率
+void RtkNode::EkfPredict(double gz, double dt)
+{
+    double cx = std::cos(ekf_.yaw);
+    double sx = std::sin(ekf_.yaw);
+    double vx = ekf_.vx;
+
+    // 状态预测
+    ekf_.x   += vx * cx * dt;
+    ekf_.y   += vx * sx * dt;
+    ekf_.yaw += gz * dt;
+    while (ekf_.yaw >  M_PI) ekf_.yaw -= 2.0 * M_PI;
+    while (ekf_.yaw < -M_PI) ekf_.yaw += 2.0 * M_PI;
+    // vx 保持不变 (常速度模型)
+
+    // Jacobian F = df/dX (行主序 4x4)
+    double F[16] = {
+        1, 0, -vx * sx * dt,  cx * dt,
+        0, 1,  vx * cx * dt,  sx * dt,
+        0, 0,  1,             0,
+        0, 0,  0,             1
+    };
+
+    // 过程噪声 Q
+    const double q_pos = 0.05 * dt;
+    const double q_yaw = 0.01 * dt;
+    const double q_vx  = 0.5  * dt;
+
+    // P = F*P*F^T + Q
+    double FP[16] = {0}, newP[16] = {0};
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            for (int k = 0; k < 4; k++)
+                FP[i*4+j] += F[i*4+k] * ekf_.P[k*4+j];
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            for (int k = 0; k < 4; k++)
+                newP[i*4+j] += FP[i*4+k] * F[j*4+k];  // F[j*4+k] = F^T[k*4+j]
+    newP[0]  += q_pos;
+    newP[5]  += q_pos;
+    newP[10] += q_yaw;
+    newP[15] += q_vx;
+    std::memcpy(ekf_.P, newP, sizeof(newP));
+}
+
+// GPS 位置测量更新 (H = [1 0 0 0; 0 1 0 0])
+void RtkNode::EkfUpdatePos(double x_gps, double y_gps, double r)
+{
+    double innov_x = x_gps - ekf_.x;
+    double innov_y = y_gps - ekf_.y;
+
+    // S = H*P*H^T + R (2x2)
+    double S[4] = {ekf_.P[0] + r, ekf_.P[1],
+                   ekf_.P[4],     ekf_.P[5] + r};
+    double det = S[0]*S[3] - S[1]*S[2];
+    if (std::fabs(det) < 1e-9) return;
+    double Si[4] = {S[3]/det, -S[1]/det, -S[2]/det, S[0]/det};
+
+    // K = P*H^T * Si  (4x2): P*H^T = 前两列 P
+    double K[8];
+    for (int i = 0; i < 4; i++) {
+        K[i*2]   = ekf_.P[i*4+0]*Si[0] + ekf_.P[i*4+1]*Si[2];
+        K[i*2+1] = ekf_.P[i*4+0]*Si[1] + ekf_.P[i*4+1]*Si[3];
+    }
+
+    // 状态更新
+    ekf_.x   += K[0]*innov_x + K[1]*innov_y;
+    ekf_.y   += K[2]*innov_x + K[3]*innov_y;
+    ekf_.yaw += K[4]*innov_x + K[5]*innov_y;
+    ekf_.vx  += K[6]*innov_x + K[7]*innov_y;
+
+    // P = (I - K*H)*P = P - K*(P[row0]; P[row1])
+    double r0[4], r1[4];
+    for (int j = 0; j < 4; j++) { r0[j] = ekf_.P[j]; r1[j] = ekf_.P[4+j]; }
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            ekf_.P[i*4+j] -= K[i*2]*r0[j] + K[i*2+1]*r1[j];
+
+    // 对称化防数值漂移
+    for (int i = 0; i < 4; i++) for (int j = i+1; j < 4; j++)
+        ekf_.P[i*4+j] = ekf_.P[j*4+i] = 0.5*(ekf_.P[i*4+j] + ekf_.P[j*4+i]);
+    for (int i = 0; i < 4; i++) if (ekf_.P[i*4+i] < 1e-6) ekf_.P[i*4+i] = 1e-6;
+}
+
+// GPS 航向测量更新 (H = [0 0 1 0])
+void RtkNode::EkfUpdateYaw(double yaw_gps, double r_yaw)
+{
+    double innov = yaw_gps - ekf_.yaw;
+    while (innov >  M_PI) innov -= 2.0 * M_PI;
+    while (innov < -M_PI) innov += 2.0 * M_PI;
+
+    double S = ekf_.P[10] + r_yaw;
+    if (std::fabs(S) < 1e-9) return;
+
+    // K = P[:,2] / S  (4x1)
+    double K[4] = {ekf_.P[2]/S, ekf_.P[6]/S, ekf_.P[10]/S, ekf_.P[14]/S};
+
+    ekf_.x   += K[0]*innov;
+    ekf_.y   += K[1]*innov;
+    ekf_.yaw += K[2]*innov;
+    ekf_.vx  += K[3]*innov;
+
+    // P = P - K*(P[row2])
+    double r2[4];
+    for (int j = 0; j < 4; j++) r2[j] = ekf_.P[2*4+j];
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            ekf_.P[i*4+j] -= K[i] * r2[j];
+
+    for (int i = 0; i < 4; i++) for (int j = i+1; j < 4; j++)
+        ekf_.P[i*4+j] = ekf_.P[j*4+i] = 0.5*(ekf_.P[i*4+j] + ekf_.P[j*4+i]);
+    for (int i = 0; i < 4; i++) if (ekf_.P[i*4+i] < 1e-6) ekf_.P[i*4+i] = 1e-6;
+}
+
+// 底盘速度反馈回调 — 直接写入 chassis_vx_，EKF 每次 GPS 更新时注入
+void RtkNode::ChassisFeedbackCallback(const std_msgs::msg::String::SharedPtr msg)
+{
+    try {
+        auto j = nlohmann::json::parse(msg->data);
+        chassis_vx_ = std::abs(j.value("vx", 0.0));  // 取绝对值, 前向速度恒正
+    } catch (...) {}
 }
 
 void RtkNode::serialReadThread()
@@ -453,67 +609,90 @@ void RtkNode::publishGpsData()
     vel_msg.twist.linear.z  = 0.0;
     velocity_pub_->publish(vel_msg);
     
-    // -------- Odometry (基于济南参考点的 ENU 局部坐标) --------
+    // -------- ENU 位置计算 --------
+    double x_east = 0.0, y_north = 0.0;
+    if (snap.valid) {
+        convertToLocalEnu(snap.latitude, snap.longitude, x_east, y_north);
+    }
+
+    // -------- ENU 航向计算 --------
+    double yaw_enu = 0.0;
+    bool   hdg_ok  = false;
+    double hdg_cov = 9999.0;
+    if (snap.heading_valid) {
+        double heading_corrected = snap.heading_deg + antenna_heading_offset_deg_;
+        double heading_rad = heading_corrected * M_PI / 180.0;
+        yaw_enu = M_PI / 2.0 - heading_rad;
+        while (yaw_enu >  M_PI) yaw_enu -= 2.0 * M_PI;
+        while (yaw_enu < -M_PI) yaw_enu += 2.0 * M_PI;
+        hdg_ok = true;
+        double s = snap.hdg_std_dev * M_PI / 180.0;
+        hdg_cov = s * s;
+        auto hdg_msg = std_msgs::msg::Float64();
+        hdg_msg.data = yaw_enu;
+        heading_pub_->publish(hdg_msg);
+    }
+
+    // -------- EKF GPS+IMU 融合 --------
+    {
+        std::lock_guard<std::mutex> lk(ekf_mutex_);
+        if (!ekf_.initialized && snap.valid) {
+            // 首次有效 GPS，初始化 EKF
+            ekf_.x    = x_east;
+            ekf_.y    = y_north;
+            ekf_.yaw  = hdg_ok ? yaw_enu : 0.0;
+            ekf_.vx   = 0.0;
+            double r  = std::max(static_cast<double>(snap.lat_sigma), 0.3);
+            double p0[16] = {r*r,0,0,0, 0,r*r,0,0,
+                             0,0,(hdg_ok ? hdg_cov*4 : 1.0),0,
+                             0,0,0,1.0};
+            std::memcpy(ekf_.P, p0, sizeof(p0));
+            ekf_.vx                 = chassis_vx_;
+            ekf_.last_predict_stamp = now;
+            ekf_.initialized        = true;
+        } else if (ekf_.initialized && snap.valid) {
+            // GPS 位置测量更新
+            double r_xy = std::max(static_cast<double>(snap.lat_sigma), 0.15);
+            EkfUpdatePos(x_east, y_north, r_xy * r_xy);
+
+            // 注入底盘轮速 (低方差直接写入, 不需要 GPS 差分)
+            ekf_.vx = chassis_vx_;
+            if (ekf_.P[15] > 0.01) ekf_.P[15] = 0.01;  // 收紧 vx 协方差
+
+            // GPS 航向测量更新
+            if (hdg_ok) EkfUpdateYaw(yaw_enu, hdg_cov);
+        }
+
+        // 用 EKF 状态替换原始 GPS 值输出
+        if (ekf_.initialized) {
+            x_east  = ekf_.x;
+            y_north = ekf_.y;
+            if (!hdg_ok) yaw_enu = ekf_.yaw;
+        }
+    }
+
+    // -------- Odometry (EKF 融合后输出) --------
     auto odom_msg = nav_msgs::msg::Odometry();
     odom_msg.header.stamp    = now;
     odom_msg.header.frame_id = "odom";
     odom_msg.child_frame_id  = "base_link";
 
-    double x_east = 0.0, y_north = 0.0;
-    if (snap.valid) {
-        convertToLocalEnu(snap.latitude,
-                          snap.longitude,
-                          x_east, y_north);
-    }
-
-    odom_msg.pose.pose.position.x = x_east;    // 东向 (m)
-    odom_msg.pose.pose.position.y = y_north;    // 北向 (m)
+    odom_msg.pose.pose.position.x = x_east;
+    odom_msg.pose.pose.position.y = y_north;
     odom_msg.pose.pose.position.z = snap.altitude;
 
-    // RTK HEADING 航向: 正北顺时针 → ENU 约定 (yaw=0 朝东, 逆时针为正)
-    // 1) 先补偿天线安装偏移: heading_corrected = heading_raw + offset
-    // 2) 再转 ENU: yaw_enu = π/2 - heading_corrected_rad
-    if (snap.heading_valid) {
-        double heading_corrected = snap.heading_deg + antenna_heading_offset_deg_;
-        double heading_rad = heading_corrected * M_PI / 180.0;
-        double yaw_enu = M_PI / 2.0 - heading_rad;
-        // 归一化到 [-π, π]
-        while (yaw_enu >  M_PI) yaw_enu -= 2.0 * M_PI;
-        while (yaw_enu < -M_PI) yaw_enu += 2.0 * M_PI;
+    odom_msg.pose.pose.orientation.w = std::cos(yaw_enu / 2.0);
+    odom_msg.pose.pose.orientation.x = 0.0;
+    odom_msg.pose.pose.orientation.y = 0.0;
+    odom_msg.pose.pose.orientation.z = std::sin(yaw_enu / 2.0);
 
-        // 填充 odom 四元数 (仅绕 Z 轴旋转)
-        odom_msg.pose.pose.orientation.w = std::cos(yaw_enu / 2.0);
-        odom_msg.pose.pose.orientation.x = 0.0;
-        odom_msg.pose.pose.orientation.y = 0.0;
-        odom_msg.pose.pose.orientation.z = std::sin(yaw_enu / 2.0);
-
-        // 航向协方差：用标准偏差换算 (deg→rad)²
-        double hdg_cov = (snap.hdg_std_dev * M_PI / 180.0);
-        hdg_cov *= hdg_cov;
-        odom_msg.pose.covariance[35] = hdg_cov;   // yaw 协方差
-
-        // 发布 heading 话题 (ENU yaw, 弧度)
-        auto hdg_msg = std_msgs::msg::Float64();
-        hdg_msg.data = yaw_enu;
-        heading_pub_->publish(hdg_msg);
-    } else {
-        odom_msg.pose.pose.orientation.w = 1.0;
-        odom_msg.pose.pose.orientation.x = 0.0;
-        odom_msg.pose.pose.orientation.y = 0.0;
-        odom_msg.pose.pose.orientation.z = 0.0;
-    }
-
-    // 位置协方差 (对角, 单位 m²)
-    odom_msg.pose.covariance[0]  = cov_lat;   // x
-    odom_msg.pose.covariance[7]  = cov_lon;   // y
-    odom_msg.pose.covariance[14] = cov_hgt;   // z
-    // roll/pitch 协方差设为极大 (无测量)
+    // 协方差 (原始 GPS sigma, 仅供参考)
+    odom_msg.pose.covariance[0]  = cov_lat;
+    odom_msg.pose.covariance[7]  = cov_lon;
+    odom_msg.pose.covariance[14] = cov_hgt;
     odom_msg.pose.covariance[21] = 9999.0;
     odom_msg.pose.covariance[28] = 9999.0;
-    // yaw 协方差: 有 heading 时已在上方填充, 无 heading 时设为极大
-    if (!snap.heading_valid) {
-        odom_msg.pose.covariance[35] = 9999.0;
-    }
+    odom_msg.pose.covariance[35] = hdg_ok ? hdg_cov : 9999.0;
 
     odom_pub_->publish(odom_msg);
     outdoor_odom_pub_->publish(odom_msg);

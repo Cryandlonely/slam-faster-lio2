@@ -31,6 +31,10 @@ void PurePursuitTracker::SetPath(const std::vector<Waypoint>& path, bool is_fina
     prev_speed_ = 0.0;
 }
 
+void PurePursuitTracker::SetActualSpeed(double speed) {
+    actual_speed_ = speed;
+}
+
 bool PurePursuitTracker::ComputeControl(const Pose2D& current,
                                          OmniControlCmd& cmd) {
     cmd = OmniControlCmd{};
@@ -71,7 +75,8 @@ bool PurePursuitTracker::ComputeControl(const Pose2D& current,
     }
 
     // ---- 2. 动态前视距离 ----
-    double speed = prev_speed_;
+    // 优先使用底盘反馈的实际速度; 底盘未连接时回退到上帧指令速度
+    double speed = (actual_speed_ >= 0.0) ? actual_speed_ : prev_speed_;
     double lookahead_dist = params_.lookahead_distance +
                             params_.lookahead_gain * speed;
     lookahead_dist = Clamp(lookahead_dist,
@@ -150,7 +155,6 @@ bool PurePursuitTracker::ComputeControl(const Pose2D& current,
     if (target_speed < kEpsilon) {
         target_speed = params_.max_linear_x;
     }
-    cmd.vx = target_speed;  // 前进速度 = 路径点预烘焙速度
     cmd.vy = 0.0;           // 履带车无横向移动
 
     // ---- 7. 航向控制 + CTE 纠偏叠加到 yaw_rate ----
@@ -162,6 +166,14 @@ bool PurePursuitTracker::ComputeControl(const Pose2D& current,
     // CTE → yaw_rate: cte>0 在路径左侧 → 需右转 → 负 yaw_rate
     double cte_yaw = (std::abs(cte) > params_.cte_dead_zone) ? -params_.cte_kp * cte : 0.0;
     cmd.yaw_rate = adaptive_kp * heading_error + cte_yaw;
+
+    // ---- 7b. 误差自适应降速 ----
+    // 航向误差/横向误差大时主动降速，避免高速冲过路径导致大幅摆动。
+    const double heading_ratio = std::clamp(std::abs(heading_error) / (35.0 * kDegToRad), 0.0, 1.0);
+    const double cte_ratio = std::clamp(std::abs(cte) / 1.0, 0.0, 1.0);
+    double speed_scale = 1.0 - 0.55 * heading_ratio - 0.35 * cte_ratio;
+    speed_scale = std::clamp(speed_scale, 0.25, 1.0);
+    cmd.vx = target_speed * speed_scale;
 
     // ---- 8. 限幅 ----
     cmd.vx = Clamp(cmd.vx, params_.max_linear_x);

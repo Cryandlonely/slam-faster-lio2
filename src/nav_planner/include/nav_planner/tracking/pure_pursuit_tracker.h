@@ -39,6 +39,7 @@ public:
 
     void SetParams(const TrackerParams& params);
     void SetPath(const std::vector<Waypoint>& path, bool is_final = true);
+    void SetActualSpeed(double speed);  // 注入底盘反馈的实际速度, 用于更精确的动态前视距离
     bool ComputeControl(const Pose2D& current, OmniControlCmd& cmd);
     bool IsGoalReached() const;
     TrackingDebugInfo GetDebugInfo() const;
@@ -59,6 +60,7 @@ private:
     double prev_vy_ = 0.0;
     double prev_yaw_rate_ = 0.0;
     double prev_speed_ = 0.0;
+    double actual_speed_ = -1.0;  // 底盘反馈实际速度; <0 表示未收到, 回退到 prev_speed_
 };
 
 }  // namespace slam_nav

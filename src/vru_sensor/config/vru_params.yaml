@@ -1,7 +1,7 @@
 vru_node:
   ros__parameters:
     # 串口设备路径
-    port: "/dev/ttyUSB0"
+    port: "/dev/ttyS0"
     # 波特率（默认 115200）
     baud: 115200
     # ROS frame_id

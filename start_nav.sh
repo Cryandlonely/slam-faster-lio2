@@ -128,19 +128,23 @@ echo ""
 > "$PID_FILE"
 
 # ---- 1. LiDAR 驱动 ----
-echo -e "${YELLOW}[1/4] LiDAR 驱动${NC}"
+echo -e "${YELLOW}[1/5] LiDAR 驱动${NC}"
 launch_module "livox_driver" "ros2 launch livox_ros_driver2 msg_MID360s_launch.py"
 
-# ---- 2. 底盘驱动 ----
-echo -e "${YELLOW}[2/4] 底盘驱动${NC}"
+# ---- 2. IMU 驱动 ----
+echo -e "${YELLOW}[2/5] IMU 驱动${NC}"
+launch_module "imu" "ros2 launch vru_sensor vru.launch.py" 1
+
+# ---- 3. 底盘驱动 ----
+echo -e "${YELLOW}[3/5] 底盘驱动${NC}"
 launch_module "chassis" "ros2 launch chassis chassis_launch.py" 1
 
-# ---- 3. 导航规划 + RTK ----
-echo -e "${YELLOW}[3/4] 导航规划 + RTK 定位${NC}"
-launch_module "nav_planner" "ros2 launch nav_planner slam_nav_launch.py" 2
+# ---- 4. 导航规划 + RTK ----
+echo -e "${YELLOW}[4/5] 导航规划 + RTK 定位${NC}"
+launch_module "nav_planner" "ros2 launch nav_planner slam_nav_debug_launch.py" 2
 
-# ---- 4. TCP 桥接 ----
-echo -e "${YELLOW}[4/4] TCP 桥接${NC}"
+# ---- 5. TCP 桥接 ----
+echo -e "${YELLOW}[5/5] TCP 桥接${NC}"
 launch_module "bridge" "ros2 launch bridge bridge_launch.py" 1
 
 echo ""

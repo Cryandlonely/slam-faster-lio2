@@ -29,7 +29,7 @@ Visualization Manager:
       Cell Size: 1
       Color: 160; 160; 164
       Plane: XY
-      Plane Cell Count: 100
+      Plane Cell Count: 40
       Reference Frame: <Fixed Frame>
 
     # ---- 规划路径 (绿色) ----
@@ -107,9 +107,22 @@ Visualization Manager:
       Queue Size: 5
       Frame: <Fixed Frame>
 
-    # ---- 动态障碍点 Marker (橙色点阵) ----
+    # ---- 规划路线 Marker (亮绿色线) ----
     - Class: rviz_default_plugins/Marker
       Enabled: true
+      Name: Planned Route Marker
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /planned_route_marker
+      Queue Size: 5
+      Frame: <Fixed Frame>
+
+    # ---- 动态障碍点 Marker (橙色点阵) ----
+    - Class: rviz_default_plugins/Marker
+      Enabled: false
       Name: Obstacle Points
       Topic:
         Depth: 5
@@ -122,7 +135,7 @@ Visualization Manager:
 
     # ---- 绕路点 Marker (青色球) ----
     - Class: rviz_default_plugins/Marker
-      Enabled: true
+      Enabled: false
       Name: Blocked/Detour Point
       Topic:
         Depth: 5
@@ -152,7 +165,7 @@ Visualization Manager:
   Global Options:
     Background Color: 48; 48; 48
     Fixed Frame: map
-    Frame Rate: 30
+    Frame Rate: 15
   Name: root
   Tools:
     - Class: rviz_default_plugins/MoveCamera
@@ -172,7 +185,7 @@ Visualization Manager:
       Name: Current View
       Near Clip Distance: 0.01
       Scale: 40
-      Target Frame: <Fixed Frame>
+      Target Frame: body
       Value: TopDownOrtho (rviz_default_plugins)
       X: 0
       Y: 0

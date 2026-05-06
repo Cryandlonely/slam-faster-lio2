@@ -56,6 +56,7 @@ private:
     void NavWaypointsCallback(const std_msgs::msg::String::SharedPtr msg);
     void NavCancelCallback(const std_msgs::msg::Bool::SharedPtr msg);
     void NavPauseCallback(const std_msgs::msg::Bool::SharedPtr msg);
+    void ChassisFeedbackCallback(const std_msgs::msg::String::SharedPtr msg);  // 底盘反馈实际速度
 
     // ---- 多航点队列管理 ----
     void CancelMultiNav();
@@ -73,6 +74,7 @@ private:
     void PublishTF();
     void PublishActualTrajectory();
     void PublishGoalMarker();
+    void PublishPlannedRouteMarker();
 
     // ---- 状态机回调 ----
     void OnStateChange(NavState old_state, NavState new_state);
@@ -90,6 +92,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr nav_waypoints_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr   nav_cancel_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr   nav_pause_sub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr chassis_feedback_sub_;  // 底盘反馈
 
     // 发布
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr          path_pub_;
@@ -101,6 +104,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr          robot_enable_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr          actual_trajectory_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr goal_marker_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr planned_route_marker_pub_;
 
     // TF
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
@@ -130,6 +134,8 @@ private:
     bool   multi_nav_active_ = false;
 
     bool nav_paused_ = false;
+
+    double actual_chassis_speed_ = -1.0;  // 底盘反馈实际线速 (m/s); 调用 SetActualSpeed 传入 tracker
 
     // ==================== 参数 ====================
     double control_rate_           = 10.0;
