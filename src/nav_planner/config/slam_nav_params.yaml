@@ -20,26 +20,26 @@ slam_nav_node:
     # ---- 规划参数 ----
     planning:
       path_resolution: 0.5    # 路径点间距 (m), GPS模式适当放大
-      target_speed: 1.5       # 默认目标速度 (m/s), 降速提升跟踪稳定性
+      target_speed: 1.0       # 默认目标速度 (m/s), 降速提升跟踪稳定性
       slow_down_dist: 1.5     # 减速区距离 (m); 到达 goal_tolerance 边界时速度约 0.53 m/s, 不会蠕行
       min_speed: 0.2         # 减速区最低速度 (m/s)
 
     # ---- 跟踪参数 (单点GPS实测: 95%误差42.6cm, 强漂移噪声) ----
     tracking:
-      lookahead_distance: 2.0         # 前视距离基础值 (m), 增大以跨越定位漂移范围
-      min_lookahead: 1.5              # 最小前视距离 (m), 不能小于定位漂移幅度
+      lookahead_distance: 3.0         # 前视距离基础值 (m), 增大以跨越定位漂移范围
+      min_lookahead: 2.0              # 最小前视距离 (m), 不能小于定位漂移幅度
       max_lookahead: 8.0              # 最大前视距离 (m)
       lookahead_gain: 1.0             # 速度增益
       goal_tolerance: 1.0             # 到达判定阈值 (m), 单点GPS实测95%误差×2.5
       heading_tolerance: 15.0        # 最终朝向阈值 (度), 180=不对齐
-      max_linear_x: 1.5               # 最大前进速度 (m/s)
+      max_linear_x: 1.0               # 最大前进速度 (m/s)
       max_linear_y: 0.0               # 最大侧移速度 (m/s), 履带车无横向移动
-      max_angular_velocity: 1.2      # 最大角速度 (rad/s)
-      heading_kp: 1.2                 # 航向 P 控制增益, 降低防止漂移引起来回摆动
-      cte_kp: 0.25                    # 横向跟踪误差增益, 漂移噪声强, 不宜过大
-      cte_dead_zone: 0.65             # CTE 死区 (m); 实测95%误差×1.5=0.64m
-      cmd_filter_alpha: 0.10          # 低通滤波系数, 漂移为低频应尽量平滑输出
-      heading_align_threshold: 15.0   # 起步航向对齐阈值 (度)
+      max_angular_velocity: 1.0      # 最大角速度 (rad/s)
+      heading_kp: 0.8                 # 航向 P 控制增益, 降低防止漂移引起来回摆动
+      cte_kp: 0.8                    # 横向跟踪误差增益, 漂移噪声强, 不宜过大
+      cte_dead_zone: 0.15             # CTE 死区 (m); 实测95%误差×1.5=0.64m
+      cmd_filter_alpha: 0.25          # 低通滤波系数, 漂移为低频应尽量平滑输出
+      heading_align_threshold: 10.0   # 起步航向对齐阈值 (度)
 
     # ---- 控制频率 ----
     control:
@@ -47,10 +47,30 @@ slam_nav_node:
 
     # ---- SDK 接口 ----
     sdk:
-      max_vx: 1.5
+      max_vx: 1.0
       max_vy: 0.0        # 履带车无横向移动
       max_yaw_rate: 1.2
 
     # ---- 调试 ----
     debug:
       status_rate: 3.0
+
+    # ---- 前方过滤盒避障 ----
+    # 检测车体系前方矩形盒内的 livox 点云, 触发后插入两个绕障航点重新规划
+    # 坐标系: livox 雷达系 ≈ body 系 (x前, y左+, z上); MID360 与 body 外参可忽略
+    obstacle:
+      enabled: true
+      cloud_topic: "/livox/lidar"     # livox CustomMsg 话题
+      x_min: 0.3                       # 检测盒前向下限 (m), 避开车体本身
+      x_max: 1.2                       # 检测盒前向上限 (m), 用户要求 1.2m
+      y_min: -1.0                      # 检测盒右侧 (m), y 左+
+      y_max: 1.0                       # 检测盒左侧 (m)
+      z_min: 1.0                       # 检测盒高度下限 (m), 避免地面
+      z_max: 2.0                       # 检测盒高度上限 (m)
+      min_points: 10                   # 盒内点数 ≥ 该值才视为障碍
+      trigger_frames: 1                # 连续 N 帧命中才触发重规划
+      hold_clear_frames: 6             # 连续 N 帧无障碍才解除绕障状态
+      bypass_offset: 1.4               # 绕障横向偏置 (m), 用户要求 1.2m
+      bypass_forward_clear: 1.5        # 绕到障碍前方 N 米再回归 (m)
+      bypass_side: "right"             # 固定绕到右侧 (right / left)
+      replan_cooldown_sec: 2.0         # 两次重规划最小间隔 (s), 防止抖动

@@ -11,6 +11,8 @@ SLAM 导航模块启动文件
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
+from launch.actions import IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 
 
@@ -20,17 +22,14 @@ def generate_launch_description():
         'config',
         'slam_nav_params.yaml')
 
-    rtk_config = os.path.join(
+    # 通过 include rtk_launch.py 启动 RTK 节点, 复用其内置的 USB 串口动态检测
+    rtk_launch_file = os.path.join(
         get_package_share_directory('rtk'),
-        'config',
-        'rtk_params.yaml')
+        'launch',
+        'rtk_launch.py')
 
-    rtk_node = Node(
-        package='rtk',
-        executable='rtk_node',
-        name='rtk_node',
-        output='screen',
-        parameters=[rtk_config],
+    rtk_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(rtk_launch_file),
     )
 
     slam_nav_node = Node(
@@ -58,6 +57,6 @@ def generate_launch_description():
     return LaunchDescription([
         static_tf_body_to_base,
         static_tf_body_to_livox,
-        rtk_node,
+        rtk_launch,
         slam_nav_node,
     ])

@@ -3,31 +3,141 @@
 namespace rtk
 {
 
-// ==================== CRC32 校验 (Unicore 二进制协议) ====================
+// ==================== NMEA 工具函数 ====================
 
-static uint32_t crc32_table_[256];
-static bool     crc32_table_init_ = false;
-
-static void init_crc32_table()
+// 校验 NMEA checksum: XOR $...*XX 中所有字节
+bool RtkNode::VerifyNmeaChecksum(const std::string& sentence) const
 {
-    for (uint32_t i = 0; i < 256; i++) {
-        uint32_t crc = i;
-        for (int j = 0; j < 8; j++) {
-            crc = (crc & 1) ? ((crc >> 1) ^ 0xEDB88320u) : (crc >> 1);
-        }
-        crc32_table_[i] = crc;
+    size_t star = sentence.rfind('*');
+    if (star == std::string::npos || star + 2 >= sentence.size()) return false;
+    uint8_t computed = 0;
+    for (size_t i = 1; i < star; i++)  // 跳过 '$'
+        computed ^= static_cast<uint8_t>(sentence[i]);
+    try {
+        uint8_t received = static_cast<uint8_t>(
+            std::stoul(sentence.substr(star + 1, 2), nullptr, 16));
+        return computed == received;
+    } catch (...) {
+        return false;
     }
-    crc32_table_init_ = true;
 }
 
-static uint32_t calc_crc32(const uint8_t* data, size_t len)
+// 切割 NMEA 语句：去掉 *XX checksum 为果后按逗号分割
+std::vector<std::string> RtkNode::SplitNmea(const std::string& sentence) const
 {
-    if (!crc32_table_init_) init_crc32_table();
-    uint32_t crc = 0;
-    for (size_t i = 0; i < len; i++) {
-        crc = crc32_table_[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+    std::string s = sentence;
+    size_t star = s.find('*');
+    if (star != std::string::npos) s = s.substr(0, star);
+    std::vector<std::string> fields;
+    std::stringstream ss(s);
+    std::string field;
+    while (std::getline(ss, field, ','))
+        fields.push_back(field);
+    return fields;
+}
+
+// 解析 NMEA 纬度/经度 (DDMM.MMMMM 或 DDDMM.MMMMM)
+double RtkNode::ParseNmeaLatLon(const std::string& value, const std::string& dir) const
+{
+    if (value.empty()) return 0.0;
+    double v        = std::stod(value);
+    double degrees  = std::floor(v / 100.0);
+    double minutes  = v - degrees * 100.0;
+    double result   = degrees + minutes / 60.0;
+    if (dir == "S" || dir == "W") result = -result;
+    return result;
+}
+
+// ==================== NMEA 语句解析器 ====================
+
+// $GNGGA / $GPGGA —— 位置、定位质量、卫星数、HDOP、高度、大地水准面差距
+void RtkNode::ParseGga(const std::vector<std::string>& fields)
+{
+    // idx: 0=$GNGGA, 1=time, 2=lat, 3=N/S, 4=lon, 5=E/W,
+    //      6=fix, 7=svs, 8=hdop, 9=alt, 10=M, 11=geoid, 12=M, 13=age, 14=stn*cs
+    if (fields.size() < 10) return;
+    int fix_q = fields[6].empty() ? 0 : std::stoi(fields[6]);
+
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    current_gps_data_.fix_quality    = fix_q;
+    current_gps_data_.valid          = (fix_q > 0);
+    current_gps_data_.num_satellites = fields[7].empty() ? 0 : std::stoi(fields[7]);
+    current_gps_data_.hdop           = fields[8].empty() ? 99.9f : std::stof(fields[8]);
+    current_gps_data_.altitude       = fields[9].empty() ? 0.0 : std::stod(fields[9]);
+    if (fields.size() > 11 && !fields[11].empty())
+        current_gps_data_.undulation = std::stof(fields[11]);
+    if (fields.size() > 13 && !fields[13].empty())
+        current_gps_data_.diff_age   = std::stof(fields[13]);
+    if (!fields[2].empty() && !fields[3].empty() &&
+        !fields[4].empty() && !fields[5].empty()) {
+        current_gps_data_.latitude  = ParseNmeaLatLon(fields[2], fields[3]);
+        current_gps_data_.longitude = ParseNmeaLatLon(fields[4], fields[5]);
     }
-    return crc;
+    // 无 $GST 时用 HDOP×5 估算 sigma；$GST 到来后会覆盖
+    float sigma_xy = current_gps_data_.hdop * 5.0f;
+    current_gps_data_.lat_sigma = sigma_xy;
+    current_gps_data_.lon_sigma = sigma_xy;
+    gga_msg_count_++;
+}
+
+// $GNHPR —— 双天线航向/俯仰/横滚 (新协议: 东向为0, 顺时针 0=E,90=S,180=W,270=N)
+void RtkNode::ParseHpr(const std::vector<std::string>& fields)
+{
+    // $GNHPR,time,heading,pitch,roll,status,svs,hdop,baseline*cs
+    // idx: 0=$GNHPR, 1=time, 2=heading(0~360°,顺时针自正东), 3=pitch, 4=roll,
+    //      5=status, 6=svs, 7=hdop, 8=baseline*cs
+    if (fields.size() < 3 || fields[2].empty()) return;
+    float heading = std::stof(fields[2]);
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    current_gps_data_.heading_deg   = heading;
+    current_gps_data_.hdg_std_dev   = 0.5f;  // HPR 无标准差字段，使用固定估计值 0.5°
+    current_gps_data_.heading_valid = true;
+    hdt_msg_count_++;
+}
+
+// $GNGST / $GPGST —— 位置精度统计 (sigma)
+void RtkNode::ParseGst(const std::vector<std::string>& fields)
+{
+    // idx: 0=$GNGST, 1=time, 2=rms, 3=semi-major, 4=semi-minor,
+    //      5=orient, 6=lat-sig, 7=lon-sig, 8=hgt-sig*cs
+    if (fields.size() < 9) return;
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    if (!fields[6].empty()) current_gps_data_.lat_sigma = std::stof(fields[6]);
+    if (!fields[7].empty()) current_gps_data_.lon_sigma = std::stof(fields[7]);
+    if (!fields[8].empty()) current_gps_data_.hgt_sigma = std::stof(fields[8]);
+}
+
+// $GNRMC / $GPRMC —— 地速 (knots → m/s)
+void RtkNode::ParseRmc(const std::vector<std::string>& fields)
+{
+    // idx: 0=$GNRMC, 1=time, 2=status(A/V), 3=lat, 4=N/S, 5=lon, 6=E/W,
+    //      7=speed_knots, 8=cog, 9=date ...
+    if (fields.size() < 8 || fields[2] != "A") return;  // A=有效
+    if (!fields[7].empty()) {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        current_gps_data_.speed = std::stof(fields[7]) * 0.5144444;  // knots → m/s
+    }
+}
+
+// 校验 + 分发 NMEA 行
+void RtkNode::ProcessNmeaLine(const std::string& line)
+{
+    if (line.empty() || line[0] != '$') return;
+    if (!VerifyNmeaChecksum(line)) {
+        RCLCPP_DEBUG(this->get_logger(), "NMEA checksum 失败: %s", line.c_str());
+        return;
+    }
+    auto fields = SplitNmea(line);
+    if (fields.empty()) return;
+    const std::string& id = fields[0];
+    if (id.size() >= 3) {
+        const std::string suffix = id.substr(id.size() - 3);
+        if      (suffix == "GGA" && fields.size() >= 10) ParseGga(fields);
+        else if (suffix == "HPR" && fields.size() >= 3)  ParseHpr(fields);
+        else if (suffix == "GST" && fields.size() >= 9)  ParseGst(fields);
+        else if (suffix == "RMC" && fields.size() >= 8)  ParseRmc(fields);
+        else if (suffix == "HDT" && fields.size() >= 2)  ParseHpr(fields);  // 兼容 $GNHDT
+    }
 }
 
 // ==================== RtkNode 实现 ====================
@@ -88,8 +198,8 @@ RtkNode::RtkNode(const rclcpp::NodeOptions& options)
         std::bind(&RtkNode::ChassisFeedbackCallback, this, std::placeholders::_1));
     RCLCPP_INFO(this->get_logger(), "底盘反馈话题: %s", chassis_feedback_topic.c_str());
     
-    // 预分配二进制缓冲区
-    binary_buffer_.reserve(4096);
+    // 预分配 NMEA 行缓冲区
+    nmea_line_buf_.reserve(512);
     
     // 初始化串口
     if (!initSerial()) {
@@ -107,7 +217,7 @@ RtkNode::RtkNode(const rclcpp::NodeOptions& options)
         std::chrono::duration_cast<std::chrono::nanoseconds>(period),
         std::bind(&RtkNode::timerCallback, this));
     
-    RCLCPP_INFO(this->get_logger(), "RTK Node 初始化完成，等待 BESTPOS(ID=42) / HEADING(ID=971) 二进制消息 ...");
+    RCLCPP_INFO(this->get_logger(), "RTK Node 初始化完成，等待 NMEA 0183 语句 ($GNGGA / $GNHDT / $GNGST) ...");
     RCLCPP_INFO(this->get_logger(), "统一室外位姿话题: %s", outdoor_odom_topic_.c_str());
 }
 
@@ -348,7 +458,7 @@ void RtkNode::ChassisFeedbackCallback(const std_msgs::msg::String::SharedPtr msg
 
 void RtkNode::serialReadThread()
 {
-    uint8_t read_buf[512];
+    char read_buf[512];
 
     while (running_) {
         if (serial_fd_ < 0) {
@@ -356,11 +466,10 @@ void RtkNode::serialReadThread()
             continue;
         }
 
-        // 读取原始字节数据
         ssize_t bytes_read = read(serial_fd_, read_buf, sizeof(read_buf));
 
         if (bytes_read > 0) {
-            binary_buffer_.insert(binary_buffer_.end(), read_buf, read_buf + bytes_read);
+            nmea_line_buf_.append(read_buf, static_cast<size_t>(bytes_read));
         } else if (bytes_read < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
             RCLCPP_WARN(this->get_logger(), "串口读取错误: %s", strerror(errno));
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -370,161 +479,23 @@ void RtkNode::serialReadThread()
             continue;
         }
 
-        // 在缓冲区中解析完整的 Unicore 二进制消息
-        while (binary_buffer_.size() >= sizeof(BinaryHeader) + 4) {
-
-            // 搜索同步头 0xAA 0x44 0x12
-            size_t sync_pos = SIZE_MAX;
-            for (size_t i = 0; i + 2 < binary_buffer_.size(); i++) {
-                if (binary_buffer_[i]   == SYNC_BYTE_1 &&
-                    binary_buffer_[i+1] == SYNC_BYTE_2 &&
-                    binary_buffer_[i+2] == SYNC_BYTE_3) {
-                    sync_pos = i;
-                    break;
+        // 提取完整的 NMEA 行（以 \n 结尾）
+        size_t pos;
+        while ((pos = nmea_line_buf_.find('\n')) != std::string::npos) {
+            std::string line = nmea_line_buf_.substr(0, pos);
+            nmea_line_buf_.erase(0, pos + 1);
+            // 去掉尾部 \r
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty()) {
+                try { ProcessNmeaLine(line); }
+                catch (const std::exception& e) {
+                    RCLCPP_DEBUG(this->get_logger(), "NMEA 解析异常: %s", e.what());
                 }
             }
-
-            // 未找到同步头，丢弃旧数据（保留末尾2字节防止跨包）
-            if (sync_pos == SIZE_MAX) {
-                if (binary_buffer_.size() > 2)
-                    binary_buffer_.erase(binary_buffer_.begin(), binary_buffer_.end() - 2);
-                break;
-            }
-
-            // 丢弃同步头之前的无效数据
-            if (sync_pos > 0)
-                binary_buffer_.erase(binary_buffer_.begin(), binary_buffer_.begin() + sync_pos);
-
-            // 头部数据不足，等待更多数据
-            if (binary_buffer_.size() < sizeof(BinaryHeader)) break;
-
-            // 解析消息头
-            BinaryHeader header;
-            std::memcpy(&header, binary_buffer_.data(), sizeof(BinaryHeader));
-
-            // 完整消息长度 = 头部长度 + 消息体长度 + 4字节CRC
-            size_t total_msg_len = (size_t)header.header_length + header.msg_length + 4;
-
-            // 数据不足，等待更多数据
-            if (binary_buffer_.size() < total_msg_len) break;
-
-            // CRC32 校验
-            size_t   crc_data_len = (size_t)header.header_length + header.msg_length;
-            uint32_t computed_crc = calc_crc32(binary_buffer_.data(), crc_data_len);
-            uint32_t received_crc = 0;
-            std::memcpy(&received_crc, binary_buffer_.data() + crc_data_len, 4);
-
-            if (computed_crc != received_crc) {
-                // CRC 失败，跳过当前同步头，继续搜索
-                binary_buffer_.erase(binary_buffer_.begin(), binary_buffer_.begin() + 3);
-                continue;
-            }
-
-            // CRC 通过，解析 BESTPOS 消息
-            if (header.msg_id == BESTPOS_MSG_ID &&
-                header.msg_length >= sizeof(BestPosBody))
-            {
-                BestPosBody bestpos;
-                std::memcpy(&bestpos, binary_buffer_.data() + header.header_length, sizeof(BestPosBody));
-
-                GpsData gps;
-                gps.latitude       = bestpos.lat;
-                gps.longitude      = bestpos.lon;
-                gps.altitude       = bestpos.hgt;
-                gps.undulation     = bestpos.undulation;
-                gps.sol_status     = bestpos.sol_status;
-                gps.pos_type       = bestpos.pos_type;
-                gps.num_satellites = static_cast<int>(bestpos.num_svs);
-                gps.num_soln_svs   = static_cast<int>(bestpos.num_soln_svs);
-                gps.lat_sigma      = bestpos.lat_sigma;
-                gps.lon_sigma      = bestpos.lon_sigma;
-                gps.hgt_sigma      = bestpos.hgt_sigma;
-                gps.diff_age       = bestpos.diff_age;
-                gps.sol_age        = bestpos.sol_age;
-                gps.valid          = (bestpos.sol_status == 0);  // 0 = SOL_COMPUTED (表9-48)
-
-                // pos_type → fix_quality 映射 (参考表 9-47 位置或速度类型)
-                switch (bestpos.pos_type) {
-                    case 48: case 49: case 50:              // L1_INT / WIDE_INT / NARROW_INT
-                    case 56:                                // INS_RTKFIXED
-                        gps.fix_quality = 4; break;         // RTK 固定解
-                    case 32: case 33: case 34:              // L1_FLOAT / IONOFREE_FLOAT / NARROW_FLOAT
-                    case 55:                                // INS_RTKFLOAT
-                        gps.fix_quality = 5; break;         // RTK 浮点解
-                    case 17: case 18:                       // PSRDIFF / SBAS
-                    case 54:                                // INS_PSRDIFF
-                        gps.fix_quality = 2; break;         // 差分定位
-                    case 1:                                 // FIXEDPOS
-                    case 16:                                // SINGLE
-                    case 52: case 53:                       // INS / INS_PSRSP
-                        gps.fix_quality = 1; break;         // 单点定位
-                    default:
-                        gps.fix_quality = 0; break;         // 无效
-                }
-
-                {
-                    std::lock_guard<std::mutex> lock(data_mutex_);
-                    // 仅更新位置相关字段, 不覆盖 heading 字段!
-                    current_gps_data_.latitude       = gps.latitude;
-                    current_gps_data_.longitude      = gps.longitude;
-                    current_gps_data_.altitude       = gps.altitude;
-                    current_gps_data_.undulation     = gps.undulation;
-                    current_gps_data_.sol_status     = gps.sol_status;
-                    current_gps_data_.pos_type       = gps.pos_type;
-                    current_gps_data_.num_satellites  = gps.num_satellites;
-                    current_gps_data_.num_soln_svs   = gps.num_soln_svs;
-                    current_gps_data_.lat_sigma      = gps.lat_sigma;
-                    current_gps_data_.lon_sigma      = gps.lon_sigma;
-                    current_gps_data_.hgt_sigma      = gps.hgt_sigma;
-                    current_gps_data_.diff_age       = gps.diff_age;
-                    current_gps_data_.sol_age        = gps.sol_age;
-                    current_gps_data_.fix_quality    = gps.fix_quality;
-                    current_gps_data_.valid          = gps.valid;
-                    bestpos_msg_count_++;
-                }
-
-                // RCLCPP_INFO(this->get_logger(),
-                //     "BESTPOS: lat=%.9f lon=%.9f hgt=%.4f undulation=%.4f "
-                //     "sol_status=%u pos_type=%u svs=%u/%u ext_sol=0x%02X",
-                //     gps.latitude, gps.longitude, gps.altitude, gps.undulation,
-                //     gps.sol_status, gps.pos_type,
-                //     gps.num_soln_svs, gps.num_satellites,
-                //     bestpos.ext_sol_stat);
-            }
-
-            // ===== 解析 HEADING 消息 (Message ID=971) =====
-            if (header.msg_id == HEADING_MSG_ID &&
-                header.msg_length >= sizeof(HeadingBody))
-            {
-                HeadingBody hdg;
-                std::memcpy(&hdg, binary_buffer_.data() + header.header_length, sizeof(HeadingBody));
-
-                // RCLCPP_INFO(this->get_logger(),
-                //     "HEADING 原始: heading=%.2f° pitch=%.2f° baseline=%.3fm "
-                //     "σ(hdg)=%.3f° sol_status=%u pos_type=%u",
-                //     hdg.heading, hdg.pitch, hdg.length,
-                //     hdg.hdg_std_dev, hdg.sol_status, hdg.pos_type);
-
-                {
-                    std::lock_guard<std::mutex> lock(data_mutex_);
-                    current_gps_data_.heading_deg     = hdg.heading;       // 0~360°, 正北顺时针
-                    current_gps_data_.pitch_deg       = hdg.pitch;
-                    current_gps_data_.baseline_length  = hdg.length;
-                    current_gps_data_.hdg_std_dev     = hdg.hdg_std_dev;
-                    current_gps_data_.hdg_sol_status  = hdg.sol_status;
-                    current_gps_data_.hdg_pos_type    = hdg.pos_type;
-                    current_gps_data_.heading_valid   = (hdg.sol_status == 0);  // SOL_COMPUTED
-                    heading_msg_count_++;
-                }
-            }
-
-            // 消费当前消息，继续处理后续数据
-            binary_buffer_.erase(binary_buffer_.begin(), binary_buffer_.begin() + total_msg_len);
         }
 
-        // 防止缓冲区无限增长 (超 8 KB 时保留末尾 1 KB)
-        if (binary_buffer_.size() > 8192)
-            binary_buffer_.erase(binary_buffer_.begin(), binary_buffer_.end() - 1024);
+        // 防止缓冲区无限增长
+        if (nmea_line_buf_.size() > 4096) nmea_line_buf_.clear();
     }
 }
 
@@ -568,16 +539,17 @@ void RtkNode::publishGpsData()
     nav_msg.longitude = snap.longitude;
     nav_msg.altitude  = snap.altitude;
     
-    // pos_type → NavSatStatus 映射 (参考表 9-47)
-    switch (snap.pos_type) {
-        case 48: case 49: case 50: case 56:         // L1_INT / WIDE_INT / NARROW_INT / INS_RTKFIXED
+    // fix_quality → NavSatStatus 映射 (NMEA GGA field 6)
+    switch (snap.fix_quality) {
+        case 4:  // RTK 固定解
             nav_msg.status.status = sensor_msgs::msg::NavSatStatus::STATUS_GBAS_FIX;
             break;
-        case 32: case 33: case 34: case 55:         // L1_FLOAT / IONOFREE_FLOAT / NARROW_FLOAT / INS_RTKFLOAT
-        case 17: case 18: case 54:                  // PSRDIFF / SBAS / INS_PSRDIFF
+        case 5:  // RTK 浮点解
+        case 2:  // 差分定位
             nav_msg.status.status = sensor_msgs::msg::NavSatStatus::STATUS_SBAS_FIX;
             break;
-        case 1: case 16: case 52: case 53:          // FIXEDPOS / SINGLE / INS / INS_PSRSP
+        case 1:  // 单点定位
+        case 6:  // 航位推算
             nav_msg.status.status = sensor_msgs::msg::NavSatStatus::STATUS_FIX;
             break;
         default:
@@ -600,11 +572,11 @@ void RtkNode::publishGpsData()
     
     nav_sat_pub_->publish(nav_msg);
     
-    // -------- TwistStamped (BESTPOS 不含速度信息，置零) --------
+    // -------- TwistStamped (RMC 速度，没有 RMC 时置零) --------
     auto vel_msg = geometry_msgs::msg::TwistStamped();
     vel_msg.header.stamp    = now;
     vel_msg.header.frame_id = "gps";
-    vel_msg.twist.linear.x  = 0.0;
+    vel_msg.twist.linear.x  = snap.speed;
     vel_msg.twist.linear.y  = 0.0;
     vel_msg.twist.linear.z  = 0.0;
     velocity_pub_->publish(vel_msg);
@@ -622,7 +594,9 @@ void RtkNode::publishGpsData()
     if (snap.heading_valid) {
         double heading_corrected = snap.heading_deg + antenna_heading_offset_deg_;
         double heading_rad = heading_corrected * M_PI / 180.0;
-        yaw_enu = M_PI / 2.0 - heading_rad;
+        // 设备约定 (新协议): 顺时针自正东 (0=E, 90=S, 180=W, 270=N)
+        // ENU yaw 逆时针自正东: yaw = -heading_rad
+        yaw_enu = -heading_rad;
         while (yaw_enu >  M_PI) yaw_enu -= 2.0 * M_PI;
         while (yaw_enu < -M_PI) yaw_enu += 2.0 * M_PI;
         hdg_ok = true;
@@ -702,33 +676,29 @@ void RtkNode::publishGpsData()
     if (++log_counter >= 5) {
         log_counter = 0;
         RCLCPP_INFO(this->get_logger(),
-            "BESTPOS: lat=%.9f lon=%.9f hgt=%.4fm "
-            "| sol=%u pos_type=%u svs=%u/%u "
-            "| σ(lat=%.4f lon=%.4f hgt=%.4f)m diff_age=%.1fs sol_age=%.1fs",
+            "GGA: lat=%.9f lon=%.9f hgt=%.4fm "
+            "| fix=%d svs=%d hdop=%.2f "
+            "| σ(lat=%.4f lon=%.4f hgt=%.4f)m diff_age=%.1fs",
             snap.latitude, snap.longitude, snap.altitude,
-            snap.sol_status, snap.pos_type,
-            snap.num_soln_svs, snap.num_satellites,
+            snap.fix_quality, snap.num_satellites, snap.hdop,
             snap.lat_sigma, snap.lon_sigma, snap.hgt_sigma,
-            snap.diff_age, snap.sol_age);
+            snap.diff_age);
 
         if (snap.heading_valid) {
             double hdg_corrected = snap.heading_deg + antenna_heading_offset_deg_;
-            double yaw_enu = M_PI / 2.0 - hdg_corrected * M_PI / 180.0;
-            while (yaw_enu >  M_PI) yaw_enu -= 2.0 * M_PI;
-            while (yaw_enu < -M_PI) yaw_enu += 2.0 * M_PI;
+            double yaw_enu_log = -hdg_corrected * M_PI / 180.0;
+            while (yaw_enu_log >  M_PI) yaw_enu_log -= 2.0 * M_PI;
+            while (yaw_enu_log < -M_PI) yaw_enu_log += 2.0 * M_PI;
             RCLCPP_INFO(this->get_logger(),
-                "HEADING: raw=%.2f° +offset=%.1f° → corrected=%.2f° → ENU_yaw=%.4f rad (%.2f°)"
-                " | pitch=%.2f° | baseline=%.3fm | σ(hdg=%.3f°) | sol=%u pos_type=%u",
+                "HDT: raw=%.2f° +offset=%.1f° → corrected=%.2f° → ENU_yaw=%.4f rad (%.2f°)"
+                " | σ(hdg=%.3f°) | HDT总数=%u",
                 snap.heading_deg, antenna_heading_offset_deg_, hdg_corrected,
-                yaw_enu, yaw_enu * 180.0 / M_PI,
-                snap.pitch_deg,
-                snap.baseline_length, snap.hdg_std_dev,
-                snap.hdg_sol_status, snap.hdg_pos_type);
+                yaw_enu_log, yaw_enu_log * 180.0 / M_PI,
+                snap.hdg_std_dev, hdt_msg_count_);
         } else {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                "HEADING: 无有效航向 (sol_status=%u) | HEADING消息总收到=%u, BESTPOS总收到=%u",
-                snap.hdg_sol_status,
-                heading_msg_count_, bestpos_msg_count_);
+                "HEADING: 无有效航向 | HDT语句总收到=%u, GGA语句总收到=%u",
+                hdt_msg_count_, gga_msg_count_);
         }
     }
 }

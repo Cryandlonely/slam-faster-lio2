@@ -63,6 +63,19 @@ SlamNavNode::SlamNavNode(const rclcpp::NodeOptions& options)
         "/chassis/feedback", 10,
         std::bind(&SlamNavNode::ChassisFeedbackCallback, this, std::placeholders::_1));
 
+    // 前方过滤盒避障订阅 (按参数延迟订阅, 避免 obstacle.enabled=false 时仍占用带宽)
+    if (obs_enabled_) {
+        livox_cloud_sub_ = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(
+            obs_cloud_topic_, rclcpp::SensorDataQoS(),
+            std::bind(&SlamNavNode::LivoxCloudCallback, this, std::placeholders::_1));
+        RCLCPP_INFO(this->get_logger(),
+            "避障已启用: topic=%s box x[%.2f,%.2f] y[%.2f,%.2f] z[%.2f,%.2f] min_pts=%d side=%s",
+            obs_cloud_topic_.c_str(),
+            obs_x_min_, obs_x_max_, obs_y_min_, obs_y_max_,
+            obs_z_min_, obs_z_max_, obs_min_points_, obs_bypass_side_.c_str());
+    }
+    last_replan_time_ = this->now();
+
     // ---- 发布 ----
     path_pub_           = this->create_publisher<nav_msgs::msg::Path>("/planned_path", 10);
     status_pub_         = this->create_publisher<std_msgs::msg::String>("/nav_status", 10);
@@ -185,6 +198,38 @@ void SlamNavNode::DeclareAndLoadParams() {
     sp.max_yaw_rate  = this->get_parameter("sdk.max_yaw_rate").as_double();
     sdk_interface_.SetParams(sp);
 
+    // -- 避障参数 --
+    this->declare_parameter<bool>("obstacle.enabled", obs_enabled_);
+    this->declare_parameter<std::string>("obstacle.cloud_topic", obs_cloud_topic_);
+    this->declare_parameter<double>("obstacle.x_min", obs_x_min_);
+    this->declare_parameter<double>("obstacle.x_max", obs_x_max_);
+    this->declare_parameter<double>("obstacle.y_min", obs_y_min_);
+    this->declare_parameter<double>("obstacle.y_max", obs_y_max_);
+    this->declare_parameter<double>("obstacle.z_min", obs_z_min_);
+    this->declare_parameter<double>("obstacle.z_max", obs_z_max_);
+    this->declare_parameter<int>("obstacle.min_points", obs_min_points_);
+    this->declare_parameter<int>("obstacle.trigger_frames", obs_trigger_frames_);
+    this->declare_parameter<int>("obstacle.hold_clear_frames", obs_hold_clear_frames_);
+    this->declare_parameter<double>("obstacle.bypass_offset", obs_bypass_offset_);
+    this->declare_parameter<double>("obstacle.bypass_forward_clear", obs_bypass_forward_clear_);
+    this->declare_parameter<std::string>("obstacle.bypass_side", obs_bypass_side_);
+    this->declare_parameter<double>("obstacle.replan_cooldown_sec", obs_replan_cooldown_sec_);
+    obs_enabled_              = this->get_parameter("obstacle.enabled").as_bool();
+    obs_cloud_topic_          = this->get_parameter("obstacle.cloud_topic").as_string();
+    obs_x_min_                = this->get_parameter("obstacle.x_min").as_double();
+    obs_x_max_                = this->get_parameter("obstacle.x_max").as_double();
+    obs_y_min_                = this->get_parameter("obstacle.y_min").as_double();
+    obs_y_max_                = this->get_parameter("obstacle.y_max").as_double();
+    obs_z_min_                = this->get_parameter("obstacle.z_min").as_double();
+    obs_z_max_                = this->get_parameter("obstacle.z_max").as_double();
+    obs_min_points_           = this->get_parameter("obstacle.min_points").as_int();
+    obs_trigger_frames_       = this->get_parameter("obstacle.trigger_frames").as_int();
+    obs_hold_clear_frames_    = this->get_parameter("obstacle.hold_clear_frames").as_int();
+    obs_bypass_offset_        = this->get_parameter("obstacle.bypass_offset").as_double();
+    obs_bypass_forward_clear_ = this->get_parameter("obstacle.bypass_forward_clear").as_double();
+    obs_bypass_side_          = this->get_parameter("obstacle.bypass_side").as_string();
+    obs_replan_cooldown_sec_  = this->get_parameter("obstacle.replan_cooldown_sec").as_double();
+
     RCLCPP_INFO(this->get_logger(),
                 "参数加载完成: ref(%.6f, %.6f) rate=%.0f Hz goal_tol=%.2f m",
                 ref_latitude_, ref_longitude_, control_rate_, tp.goal_tolerance);
@@ -269,6 +314,12 @@ void SlamNavNode::NavCancelCallback(
     state_machine_.HandleEvent(NavEvent::CANCEL);
     tracker_.Reset();
     planner_.ClearPath();
+    // 清避障状态
+    avoiding_ = false;
+    obs_trigger_replan_ = false;
+    obs_trigger_restore_ = false;
+    obs_hit_count_ = 0;
+    obs_miss_count_ = 0;
     PublishStopCmd();
 }
 
@@ -295,6 +346,125 @@ void SlamNavNode::ChassisFeedbackCallback(
     } catch (...) {
         // 解析失败时保持上一个平切値
     }
+}
+
+// ==================== 前方过滤盒避障 ====================
+
+void SlamNavNode::LivoxCloudCallback(
+    const livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
+    if (!obs_enabled_) return;
+
+    std::lock_guard<std::mutex> lock(data_mutex_);
+
+    // 只在 TRACKING 中检测; 暂停时也跳过 (避免暂停期间被误触)
+    if (nav_paused_) return;
+    if (state_machine_.GetState() != NavState::TRACKING) return;
+
+    // 过滤盒计数 + 质心
+    int count = 0;
+    double sum_x = 0.0, sum_y = 0.0;
+    for (const auto& pt : msg->points) {
+        if (pt.x < obs_x_min_ || pt.x > obs_x_max_) continue;
+        if (pt.y < obs_y_min_ || pt.y > obs_y_max_) continue;
+        if (pt.z < obs_z_min_ || pt.z > obs_z_max_) continue;
+        sum_x += pt.x;
+        sum_y += pt.y;
+        ++count;
+    }
+
+    if (count >= obs_min_points_) {
+        obs_local_x_ = sum_x / static_cast<double>(count);
+        obs_local_y_ = sum_y / static_cast<double>(count);
+        ++obs_hit_count_;
+        obs_miss_count_ = 0;
+
+        // 触发条件: 累计 N 帧 + 不在冷却期 + 当前未在绕障状态
+        const double since_last = (this->now() - last_replan_time_).seconds();
+        if (obs_hit_count_ >= obs_trigger_frames_ &&
+            since_last >= obs_replan_cooldown_sec_ &&
+            !avoiding_) {
+            obs_trigger_replan_ = true;
+            RCLCPP_WARN(this->get_logger(),
+                "[避障] 检测到障碍 pts=%d 质心(车体系) x=%.2f y=%.2f -> 触发重规划",
+                count, obs_local_x_, obs_local_y_);
+        }
+    } else {
+        obs_hit_count_ = 0;
+        ++obs_miss_count_;
+        if (avoiding_ && obs_miss_count_ >= obs_hold_clear_frames_) {
+            avoiding_ = false;
+            obs_trigger_restore_ = true;   // 障碍消失, 在 ControlLoop 中恢复原路线
+            RCLCPP_INFO(this->get_logger(),
+                "[避障] 连续 %d 帧无障碍, 解除绕障并请求恢复原路线", obs_miss_count_);
+        }
+    }
+}
+
+bool SlamNavNode::TriggerAvoidanceReplan() {
+    // 调用方已持有 data_mutex_
+    if (!goal_pose_.has_value()) {
+        RCLCPP_WARN(this->get_logger(), "[避障] 无目标点, 取消避障");
+        return false;
+    }
+    if (!odom_received_) {
+        return false;
+    }
+
+    // 1. 车体系绕障两点 (livox 坐标系: x前, y左+; 履带车 y 同向)
+    const double sign = (obs_bypass_side_ == "right") ? -1.0 : 1.0;
+    const double bp1_lx = obs_local_x_;                                 // 与障碍同纵深
+    const double bp1_ly = sign * obs_bypass_offset_;
+    const double bp2_lx = obs_local_x_ + obs_bypass_forward_clear_;     // 障碍前方再走 forward_clear
+    const double bp2_ly = sign * obs_bypass_offset_;
+
+    // 2. 车体系 → 世界系 (使用当前位姿)
+    auto local_to_world = [this](double lx, double ly, Pose2D& out) {
+        const double c = std::cos(current_pose_.yaw);
+        const double s = std::sin(current_pose_.yaw);
+        out.x = current_pose_.x + c * lx - s * ly;
+        out.y = current_pose_.y + s * lx + c * ly;
+        out.yaw = 0.0;  // 由 PlanMulti 内部根据相邻点重算
+    };
+
+    Pose2D bp1, bp2;
+    local_to_world(bp1_lx, bp1_ly, bp1);
+    local_to_world(bp2_lx, bp2_ly, bp2);
+
+    // 3. 组装 [bypass1, bypass2, original_goal] 喂给 PlanMulti (current 由 planner 自取)
+    std::vector<Pose2D> avoid_path = { bp1, bp2, goal_pose_.value() };
+
+    if (!planner_.PlanMulti(current_pose_, avoid_path) || !planner_.HasValidPath()) {
+        RCLCPP_ERROR(this->get_logger(), "[避障] 重规划失败");
+        return false;
+    }
+
+    tracker_.SetPath(planner_.GetPath(), true);
+    avoiding_ = true;
+    last_replan_time_ = this->now();
+    obs_trigger_replan_ = false;
+
+    // 记录避障终点 + 触发时前向 + 触发时位置, 用于判断"车是否真的绕过障碍"
+    obs_bp2_world_x_ = bp2.x;
+    obs_bp2_world_y_ = bp2.y;
+    obs_forward_x_   = std::cos(current_pose_.yaw);
+    obs_forward_y_   = std::sin(current_pose_.yaw);
+    obs_trigger_x_   = current_pose_.x;
+    obs_trigger_y_   = current_pose_.y;
+    // 触发时底盘速度近 0 (静止/起步前) 才允许"未启动"快速 restore;
+    // 运动中触发的避障必须等真正绕过 bp2 才能 restore, 否则刚开始偏移就 restore 会撞障碍。
+    constexpr double kStaticSpeedThresh = 0.1;  // m/s
+    obs_triggered_while_static_ =
+        (actual_chassis_speed_ >= 0.0 && actual_chassis_speed_ < kStaticSpeedThresh);
+
+    PublishPath();
+    PublishPlannedRouteMarker();
+
+    RCLCPP_INFO(this->get_logger(),
+        "[避障] 重规划成功: bp1(%.2f,%.2f) bp2(%.2f,%.2f) -> goal(%.2f,%.2f), 共 %zu 路径点",
+        bp1.x, bp1.y, bp2.x, bp2.y,
+        goal_pose_->x, goal_pose_->y,
+        planner_.GetPath().size());
+    return true;
 }
 
 // ==================== 多航点队列 ====================
@@ -437,6 +607,75 @@ void SlamNavNode::ControlLoop() {
         }
 
         case NavState::TRACKING: {
+            // 避障: 收到障碍触发, 优先重规划绕障路径
+            if (obs_trigger_replan_) {
+                if (!TriggerAvoidanceReplan()) {
+                    // 失败时清除标志, 避免反复刷
+                    obs_trigger_replan_ = false;
+                }
+                // 重规划成功后路径已更新, 本帧仍可继续走 ComputeControl
+            }
+
+            // 避障解除: 障碍消失, 用当前位姿重新规划"current → 原 goal/多航点"
+            // 但必须等车真正绕过障碍 (沿触发时前向已走过 bp2 投影位置), 否则
+            // 障碍刚出过滤盒视野时车还在它侧方, 直接重规划会撞上去。
+            if (obs_trigger_restore_) {
+                // 1. 计算从触发避障以来的位移
+                const double dx_trig = current_pose_.x - obs_trigger_x_;
+                const double dy_trig = current_pose_.y - obs_trigger_y_;
+                const double moved   = std::sqrt(dx_trig * dx_trig + dy_trig * dy_trig);
+                const double kStillTol = 0.3;  // 触发后位移 < 0.3m 视为基本未启动
+
+                // 2. 投影 (current - bp2) 到触发时前向; ≥ -kPassTol 视为已绕过
+                const double dx = current_pose_.x - obs_bp2_world_x_;
+                const double dy = current_pose_.y - obs_bp2_world_y_;
+                const double proj = dx * obs_forward_x_ + dy * obs_forward_y_;
+                const double kPassTol = -0.2;
+
+                // 3. 两种允许 restore 的情况:
+                //    (a) 触发避障时车几乎静止 + 现在位移仍 < kStillTol
+                //        (障碍是起步前/暂停时出现并主动离开的)
+                //    (b) 车已沿前向走过 bp2 (真正绕过去了)
+                //   注意: 运动中触发的避障必须走 (b) 路径; 否则刚开始偏移
+                //        就误判 (a) 而 restore 会撞到障碍残余。
+                const bool can_restore =
+                    (obs_triggered_while_static_ && moved < kStillTol) ||
+                    (proj >= kPassTol);
+
+                if (can_restore) {
+                    obs_trigger_restore_ = false;
+                    if (goal_pose_.has_value() && odom_received_) {
+                        bool ok = false;
+                        if (multi_nav_active_ && !waypoint_queue_.empty()) {
+                            // 仅保留尚未到达的航点 (从当前 waypoint_index_ 开始)
+                            std::vector<Pose2D> remaining(
+                                waypoint_queue_.begin() + waypoint_index_,
+                                waypoint_queue_.end());
+                            if (remaining.size() > 1) {
+                                ok = planner_.PlanMulti(current_pose_, remaining);
+                            } else if (remaining.size() == 1) {
+                                ok = planner_.Plan(current_pose_, remaining.front(), true);
+                            }
+                        } else {
+                            ok = planner_.Plan(current_pose_, goal_pose_.value(), true);
+                        }
+                        if (ok && planner_.HasValidPath()) {
+                            tracker_.SetPath(planner_.GetPath(), true);
+                            last_replan_time_ = this->now();
+                            PublishPath();
+                            PublishPlannedRouteMarker();
+                            RCLCPP_INFO(this->get_logger(),
+                                "[避障] 已绕过障碍, 恢复原路线, %zu 路径点 (proj=%.2fm)",
+                                planner_.GetPath().size(), proj);
+                        } else {
+                            RCLCPP_WARN(this->get_logger(), "[避障] 恢复原路线失败");
+                        }
+                    }
+                }
+                // 不能 restore 时保持避障路径继续走, obs_trigger_restore_ 维持置位,
+                // 等待车再前进直到通过 bp2 或位移仍 < kStillTol 时下一帧再判
+            }
+
             OmniControlCmd cmd;
             tracker_.SetActualSpeed(actual_chassis_speed_);  // 底盘实际速度优先于指令速度
             bool tracking = tracker_.ComputeControl(current_pose_, cmd);
@@ -539,6 +778,10 @@ void SlamNavNode::PublishStatus() {
 
     if (nav_paused_) {
         oss << ",\"paused\":true";
+    }
+
+    if (avoiding_) {
+        oss << ",\"avoiding\":true";
     }
 
     oss << "}";
