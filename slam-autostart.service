@@ -1,0 +1,31 @@
+[Unit]
+Description=SLAM 工程自启动服务 (bridge/chassis/livox/nav_planner/rtk/vru_sensor)
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lonely
+Group=lonely
+
+# 工作目录
+WorkingDirectory=/home/lonely/slam/slam-faster-lio2
+
+# 执行启动脚本
+ExecStart=/home/lonely/slam/slam-faster-lio2/start_all.sh
+
+# 退出时发送 SIGTERM，等待 30s 后强制 SIGKILL
+KillMode=process
+TimeoutStopSec=30
+
+# 失败后自动重启（可按需改为 on-failure 或 no）
+Restart=on-failure
+RestartSec=5
+
+# 日志由脚本自行写入文件，此处也通过 journald 记录
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=slam-autostart
+
+[Install]
+WantedBy=multi-user.target
