@@ -255,9 +255,9 @@ private:
         tilt_msg.data = tilt_deg;
         pub_tilt_->publish(tilt_msg);
 
-        RCLCPP_INFO(get_logger(),
-            "[attitude] pitch=%.4f°  roll=%.4f°  yaw=%.4f°  tilt=%.4f°",
-            pitch, roll, yaw, tilt_deg);
+        // RCLCPP_INFO(get_logger(),
+        //     "[attitude] pitch=%.4f°  roll=%.4f°  yaw=%.4f°  tilt=%.4f°",
+        //     pitch, roll, yaw, tilt_deg);
     }
 
     // 功能字节 0xB0：原始 ADC（加速度+角速度）
@@ -286,9 +286,9 @@ private:
         imu_msg.orientation_covariance[0] = -1;
         pub_imu_->publish(imu_msg);
 
-        RCLCPP_INFO(get_logger(),
-            "[imu_raw] ax=%.4f ay=%.4f az=%.4f m/s²  gx=%.4f gy=%.4f gz=%.4f rad/s",
-            ax, ay, az, gx, gy, gz);
+        // RCLCPP_INFO(get_logger(),
+        //     "[imu_raw] ax=%.4f ay=%.4f az=%.4f m/s²  gx=%.4f gy=%.4f gz=%.4f rad/s",
+        //     ax, ay, az, gx, gy, gz);
     }
 
     int fd_{-1};
