@@ -20,7 +20,7 @@
 #include <std_msgs/msg/bool.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <visualization_msgs/msg/marker.hpp>
-#include <livox_ros_driver2/msg/custom_msg.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 
 #include "nav_planner/common/types.h"
 #include "nav_planner/planning/point_to_point_planner.h"
@@ -58,7 +58,7 @@ private:
     void NavCancelCallback(const std_msgs::msg::Bool::SharedPtr msg);
     void NavPauseCallback(const std_msgs::msg::Bool::SharedPtr msg);
     void ChassisFeedbackCallback(const std_msgs::msg::String::SharedPtr msg);  // 底盘反馈实际速度
-    void LivoxCloudCallback(const livox_ros_driver2::msg::CustomMsg::SharedPtr msg);  // 前方过滤盒避障
+    void PointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);  // 前方过滤盒避障
 
     // ---- 多航点队列管理 ----
     void CancelMultiNav();
@@ -100,7 +100,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr   nav_cancel_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr   nav_pause_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr chassis_feedback_sub_;  // 底盘反馈
-    rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr livox_cloud_sub_;  // 前方避障点云
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;  // 前方避障点云 (Airy PointCloud2)
 
     // 发布
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr          path_pub_;
@@ -176,7 +176,7 @@ private:
 
     // 避障参数
     bool        obs_enabled_       = false;
-    std::string obs_cloud_topic_   = "/livox/lidar";
+    std::string obs_cloud_topic_   = "/rslidar_points";
     double      obs_x_min_         = 0.3;
     double      obs_x_max_         = 1.2;
     double      obs_y_min_         = -1.0;

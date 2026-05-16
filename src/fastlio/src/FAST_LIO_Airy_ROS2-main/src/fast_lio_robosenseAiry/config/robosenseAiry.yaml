@@ -1,0 +1,56 @@
+/**:
+  ros__parameters:
+    feature_extract_enable: false 
+    point_filter_num: 4
+    max_iteration: 4
+    filter_size_surf: 0.2
+    filter_size_map: 0.2
+    cube_side_length: 200.0
+    runtime_pos_log_enable: false
+    map_file_path: "" # Overridden by the launch argument in mapping_robosense_airy.launch.py
+
+    common:
+      lid_topic: "/rslidar_points"
+      imu_topic: "/rslidar_imu_data" # /mavros/imu/data /ouster/imu /imu/data
+      time_sync_en: false # ONLY turn on when external time synchronization is really not possible
+      time_offset_lidar_to_imu: 0.0 # Time offset between lidar and IMU calibrated by other algorithms, e.g. LI-Init (can be found in README).
+      # This param will take effect no matter what time_sync_en is. So if the time offset is not known exactly, please set as 0.0
+
+    preprocess:
+      lidar_type: 5 # 1 for Livox serials LiDAR, 2 for Velodyne LiDAR, 3 for ouster LiDAR, 5 for RoboSense Airy
+      scan_line: 96
+      timestamp_unit: 0 # 0-second, 1-milisecond, 2-microsecond, 3-nanosecond.
+      blind: 0.0
+      scan_rate: 10
+
+    mapping:
+      max_search_dist_surf: 1.0 # default: 5
+      num_sub_cloud: 1 # This is int, should be fine
+      acc_cov: 0.1
+      gyr_cov: 0.1
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+      fov_degree: 120.0
+      det_range: 200.0
+      extrinsic_est_en: false # true: enable the online estimation of IMU-LiDAR extrinsic
+      extrinsic_T: [0.0167, 0.0165, -0.0046]
+      extrinsic_R: [1., 0., 0., 
+                        0., -1., 0., 
+                        0., 0., -1.]
+
+    publish:
+      path_en: true
+      effect_map_en: false
+      map_en: false
+      scan_publish_en: true # false: close all the point cloud output
+      dense_publish_en: true # false: low down the points number in a global-frame point clouds scan.
+      scan_bodyframe_pub_en: true # true: output the point cloud scans in IMU-body-frame
+
+    pcd_save:
+      pcd_save_en: true
+      interval: -1 # how many LiDAR frames saved in each pcd file;
+      # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
+      realtime_trans_save_en: true         # 是否开启实时PCD传输(覆盖写固定文件 供遥控端读取)
+      realtime_trans_interval_sec: 1.0     # 写入间隔(秒)
+      realtime_trans_rel_path: "PCD/transPCD/trans.pcd"  # 相对于 ROOT_DIR (本文件所在包的源码根目录)
+      realtime_trans_voxel_size: 0.2       # 体素降采样尺寸(m), <=0 不降采样

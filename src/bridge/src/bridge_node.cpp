@@ -139,7 +139,8 @@ void BridgeNode::DeclareAndLoadParams() {
 
     // 节点生命周期管理参数
     this->declare_parameter<std::string>("ros2_workspace", "");
-    this->declare_parameter<std::string>("mapping_config_file", "mid360.yaml");
+    this->declare_parameter<std::string>("mapping_launch_pkg", "fast_lio_robosense");
+    this->declare_parameter<std::string>("mapping_launch_file", "mapping_robosense_airy.launch.py");
     this->declare_parameter<std::string>("indoor_mapping_odom_topic", "/Odometry");
     this->declare_parameter<std::string>("outdoor_odom_topic", "/outdoor/odom");
 
@@ -154,7 +155,8 @@ void BridgeNode::DeclareAndLoadParams() {
     }
 
     ros2_workspace_           = this->get_parameter("ros2_workspace").as_string();
-    mapping_config_file_      = this->get_parameter("mapping_config_file").as_string();
+    mapping_launch_pkg_       = this->get_parameter("mapping_launch_pkg").as_string();
+    mapping_launch_file_      = this->get_parameter("mapping_launch_file").as_string();
     indoor_mapping_odom_topic_   = this->get_parameter("indoor_mapping_odom_topic").as_string();
     outdoor_odom_topic_          = this->get_parameter("outdoor_odom_topic").as_string();
 }
@@ -328,7 +330,7 @@ void BridgeNode::OnPcdTcpMessage(int client_fd, const std::string& msg) {
             out["type"] = "pcd_info";
             out["path"] = file_path;
             out["chunk_bytes"] = trans_chunk_bytes_;
-            if (!std::filesystem::exists(file_path)) {
+            if (!std::filesystem::is_regular_file(file_path)) {
                 out["exists"] = false;
                 out["size"] = 0;
                 out["mtime_ns"] = 0;
@@ -343,7 +345,7 @@ void BridgeNode::OnPcdTcpMessage(int client_fd, const std::string& msg) {
         }
 
         if (cmd == "pcd_chunk") {
-            if (!std::filesystem::exists(file_path)) {
+            if (!std::filesystem::is_regular_file(file_path)) {
                 pcd_server_->sendTo(client_fd, R"({"error":"pcd_not_found"})");
                 return;
             }
@@ -576,7 +578,7 @@ void BridgeNode::HandleLifecycleCmd(int client_fd, const std::string& subcmd) {
     };
 
     if (subcmd == "start_mapping") {
-        auto cmd = make_launch("location", "mapping.launch.py", mapping_config_file_);
+        auto cmd = make_launch(mapping_launch_pkg_, mapping_launch_file_, "");
         StartManagedProcess("mapping", cmd);
         // nav_planner 直接用 /Odometry（建图模式）
         PublishNavModeSwitch(indoor_mapping_odom_topic_, false);

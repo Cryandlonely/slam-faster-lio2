@@ -102,7 +102,8 @@ private:
 
     // 节点生命周期管理参数
     std::string ros2_workspace_;
-    std::string mapping_config_file_   = "mid360.yaml";
+    std::string mapping_launch_pkg_    = "fast_lio_robosense";
+    std::string mapping_launch_file_   = "mapping_robosense_airy.launch.py";
     std::string indoor_mapping_odom_topic_   = "/Odometry";
     std::string outdoor_odom_topic_          = "/outdoor/odom";
 

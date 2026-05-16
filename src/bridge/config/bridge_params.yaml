@@ -13,8 +13,8 @@ bridge_node:
     # SLAM 里程计话题 (需与 FAST_LIO 输出一致)
     slam_odom_topic: "/Odometry"
 
-    # 实时点云文件相对路径 (相对于 bridge 启动目录)
-    trans_pcd_rel_path: "src/location/PCD/transPCD/trans.pcd"
+    # 实时点云文件绝对路径，与 robosenseAiry.yaml 中 ROOT_DIR+realtime_trans_rel_path 一致
+    trans_pcd_rel_path: "/home/lonely/slam/slam-faster-lio2/src/fastlio/src/FAST_LIO_Airy_ROS2-main/src/fast_lio_robosenseAiry/PCD/transPCD/trans.pcd"
 
     # PCD 分片传输单包最大字节数
     trans_chunk_bytes: 65536
@@ -24,8 +24,9 @@ bridge_node:
     # 注意: 不同机器路径不同, 留空时子进程继承父进程已 source 的环境 (推荐)
     ros2_workspace: ""
 
-    # 建图 launch 使用的配置文件名 (在 location/config/ 目录下)
-    mapping_config_file: "mid360.yaml"
+    # 建图 launch 包名和 launch 文件名
+    mapping_launch_pkg: "fast_lio_robosense"
+    mapping_launch_file: "mapping_robosense_airy.launch.py"
 
     # 纯建图模式的定位话题 (FAST-LIO /Odometry)
     indoor_mapping_odom_topic: "/Odometry"

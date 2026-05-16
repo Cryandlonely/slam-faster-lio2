@@ -56,11 +56,11 @@ slam_nav_node:
       status_rate: 3.0
 
     # ---- 前方过滤盒避障 ----
-    # 检测车体系前方矩形盒内的 livox 点云, 触发后插入两个绕障航点重新规划
-    # 坐标系: livox 雷达系 ≈ body 系 (x前, y左+, z上); MID360 与 body 外参可忽略
+    # 检测车体系前方矩形盒内的速腾 Airy 点云, 触发后插入两个绕障航点重新规划
+    # 坐标系: Airy 雷达系 ≈ body 系 (x前, y左+, z上); Airy 与 body 外参可忽略
     obstacle:
       enabled: true
-      cloud_topic: "/livox/lidar"     # livox CustomMsg 话题
+      cloud_topic: "/rslidar_points"  # 速腾 Airy PointCloud2 话题
       x_min: 0.3                       # 检测盒前向下限 (m), 避开车体本身
       x_max: 1.2                       # 检测盒前向上限 (m), 用户要求 1.2m
       y_min: -1.0                      # 检测盒右侧 (m), y 左+

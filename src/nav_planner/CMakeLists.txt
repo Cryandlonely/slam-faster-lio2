@@ -16,8 +16,8 @@ find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(visualization_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(nlohmann_json REQUIRED)
-find_package(livox_ros_driver2 REQUIRED)
 
 # ---- 头文件 ----
 include_directories(include)
@@ -51,7 +51,7 @@ ament_target_dependencies(slam_nav_node
   std_msgs
   tf2_ros
   visualization_msgs
-  livox_ros_driver2
+  sensor_msgs
 )
 
 # ---- 安装 ----

@@ -12,6 +12,7 @@
 #include "nav_planner/slam_nav_node.h"
 #include "nav_planner/common/math_utils.h"
 
+#include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <chrono>
 #include <cmath>
 #include <iomanip>
@@ -65,9 +66,9 @@ SlamNavNode::SlamNavNode(const rclcpp::NodeOptions& options)
 
     // 前方过滤盒避障订阅 (按参数延迟订阅, 避免 obstacle.enabled=false 时仍占用带宽)
     if (obs_enabled_) {
-        livox_cloud_sub_ = this->create_subscription<livox_ros_driver2::msg::CustomMsg>(
+        cloud_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
             obs_cloud_topic_, rclcpp::SensorDataQoS(),
-            std::bind(&SlamNavNode::LivoxCloudCallback, this, std::placeholders::_1));
+            std::bind(&SlamNavNode::PointCloudCallback, this, std::placeholders::_1));
         RCLCPP_INFO(this->get_logger(),
             "避障已启用: topic=%s box x[%.2f,%.2f] y[%.2f,%.2f] z[%.2f,%.2f] min_pts=%d side=%s",
             obs_cloud_topic_.c_str(),
@@ -350,8 +351,8 @@ void SlamNavNode::ChassisFeedbackCallback(
 
 // ==================== 前方过滤盒避障 ====================
 
-void SlamNavNode::LivoxCloudCallback(
-    const livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
+void SlamNavNode::PointCloudCallback(
+    const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     if (!obs_enabled_) return;
 
     std::lock_guard<std::mutex> lock(data_mutex_);
@@ -363,12 +364,22 @@ void SlamNavNode::LivoxCloudCallback(
     // 过滤盒计数 + 质心
     int count = 0;
     double sum_x = 0.0, sum_y = 0.0;
-    for (const auto& pt : msg->points) {
-        if (pt.x < obs_x_min_ || pt.x > obs_x_max_) continue;
-        if (pt.y < obs_y_min_ || pt.y > obs_y_max_) continue;
-        if (pt.z < obs_z_min_ || pt.z > obs_z_max_) continue;
-        sum_x += pt.x;
-        sum_y += pt.y;
+
+    sensor_msgs::PointCloud2ConstIterator<float> iter_x(*msg, "x");
+    sensor_msgs::PointCloud2ConstIterator<float> iter_y(*msg, "y");
+    sensor_msgs::PointCloud2ConstIterator<float> iter_z(*msg, "z");
+
+    for (; iter_x != iter_x.end(); ++iter_x, ++iter_y, ++iter_z) {
+        const float px = *iter_x;
+        const float py = *iter_y;
+        const float pz = *iter_z;
+        // 过滤无效点
+        if (!std::isfinite(px) || !std::isfinite(py) || !std::isfinite(pz)) continue;
+        if (px < obs_x_min_ || px > obs_x_max_) continue;
+        if (py < obs_y_min_ || py > obs_y_max_) continue;
+        if (pz < obs_z_min_ || pz > obs_z_max_) continue;
+        sum_x += px;
+        sum_y += py;
         ++count;
     }
 
