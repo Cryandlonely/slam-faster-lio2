@@ -7,6 +7,13 @@ bridge_node:
     # PCD 传输专用端口 (与控制端口分离)
     pcd_tcp_port: 9091
 
+    # UDP 摇杆控制端口
+    # 协议: 发送 JSON {"vx": 0.5, "vy": 0.0, "wz": 0.3}
+    # vx: 前进速度(m/s), vy: 横移速度(m/s), wz: 旋转角速度(rad/s)
+    # 超过 joystick_timeout_sec 未收到则自动停车
+    udp_joystick_port: 9092
+    joystick_timeout_sec: 0.5
+
     # 状态推送频率 (Hz)
     status_rate: 5.0
 

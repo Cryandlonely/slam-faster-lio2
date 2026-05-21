@@ -35,6 +35,10 @@ void PurePursuitTracker::SetActualSpeed(double speed) {
     actual_speed_ = speed;
 }
 
+void PurePursuitTracker::SetGyroZ(double gz) {
+    current_gyro_z_ = gz;
+}
+
 bool PurePursuitTracker::ComputeControl(const Pose2D& current,
                                          OmniControlCmd& cmd) {
     cmd = OmniControlCmd{};
@@ -69,7 +73,9 @@ bool PurePursuitTracker::ComputeControl(const Pose2D& current,
 
         cmd.vx = 0.0;
         cmd.vy = 0.0;
-        cmd.yaw_rate = params_.heading_kp * heading_error_to_goal;
+        // PD 控制: P 项 (航向误差) - D 项 (IMU 陀螺仪阻尼, 防过冲)
+        cmd.yaw_rate = params_.heading_kp * heading_error_to_goal
+                     - params_.heading_kd * current_gyro_z_;
         cmd.yaw_rate = Clamp(cmd.yaw_rate, params_.max_angular_velocity);
         return true;
     }
@@ -114,7 +120,9 @@ bool PurePursuitTracker::ComputeControl(const Pose2D& current,
 
             cmd.vx = 0.0;
             cmd.vy = 0.0;
-            cmd.yaw_rate = params_.heading_kp * heading_err_pre;
+            // PD 控制: P 项 (航向误差) - D 项 (IMU 陀螺仪阻尼, 防过冲)
+            cmd.yaw_rate = params_.heading_kp * heading_err_pre
+                         - params_.heading_kd * current_gyro_z_;
             cmd.yaw_rate = Clamp(cmd.yaw_rate, params_.max_angular_velocity);
 
             // 低通滤波平滑 (确保平移速度平稳衰减到零)

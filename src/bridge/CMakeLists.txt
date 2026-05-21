@@ -20,9 +20,10 @@ find_package(nlohmann_json REQUIRED)
 # ---- 头文件 ----
 include_directories(include)
 
-# ---- TCP 服务器库 ----
+# ---- TCP/UDP 服务器库 ----
 add_library(bridge_tcp SHARED
   src/tcp_server.cpp
+  src/udp_server.cpp
 )
 target_include_directories(bridge_tcp PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

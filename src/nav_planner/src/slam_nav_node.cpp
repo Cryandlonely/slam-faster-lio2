@@ -64,6 +64,10 @@ SlamNavNode::SlamNavNode(const rclcpp::NodeOptions& options)
         "/chassis/feedback", 10,
         std::bind(&SlamNavNode::ChassisFeedbackCallback, this, std::placeholders::_1));
 
+    imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
+        "/chassis/imu", 10,
+        std::bind(&SlamNavNode::ImuCallback, this, std::placeholders::_1));
+
     // 前方过滤盒避障订阅 (按参数延迟订阅, 避免 obstacle.enabled=false 时仍占用带宽)
     if (obs_enabled_) {
         cloud_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -170,6 +174,7 @@ void SlamNavNode::DeclareAndLoadParams() {
     this->declare_parameter<double>("tracking.cte_dead_zone", tp.cte_dead_zone);
     this->declare_parameter<double>("tracking.cmd_filter_alpha", tp.cmd_filter_alpha);
     this->declare_parameter<double>("tracking.heading_align_threshold", tp.heading_align_threshold);
+    this->declare_parameter<double>("tracking.heading_kd", tp.heading_kd);
     tp.lookahead_distance      = this->get_parameter("tracking.lookahead_distance").as_double();
     tp.min_lookahead           = this->get_parameter("tracking.min_lookahead").as_double();
     tp.max_lookahead           = this->get_parameter("tracking.max_lookahead").as_double();
@@ -184,6 +189,7 @@ void SlamNavNode::DeclareAndLoadParams() {
     tp.cte_dead_zone           = this->get_parameter("tracking.cte_dead_zone").as_double();
     tp.cmd_filter_alpha        = this->get_parameter("tracking.cmd_filter_alpha").as_double();
     tp.heading_align_threshold = this->get_parameter("tracking.heading_align_threshold").as_double();
+    tp.heading_kd              = this->get_parameter("tracking.heading_kd").as_double();
     // heading_align_threshold 和 heading_tolerance 配置文件以度输入, 此处转为弧度
     tp.heading_align_threshold = tp.heading_align_threshold * kDegToRad;
     tp.heading_tolerance       = tp.heading_tolerance * kDegToRad;
@@ -347,6 +353,11 @@ void SlamNavNode::ChassisFeedbackCallback(
     } catch (...) {
         // 解析失败时保持上一个平切値
     }
+}
+
+void SlamNavNode::ImuCallback(const sensor_msgs::msg::Imu::SharedPtr msg) {
+    // 无锁写入 (double 写入在 x86/ARM 对齐地址上是原子的, 且 ControlLoop 读取允许轻微滞后)
+    chassis_gyro_z_ = msg->angular_velocity.z;
 }
 
 // ==================== 前方过滤盒避障 ====================
@@ -689,6 +700,7 @@ void SlamNavNode::ControlLoop() {
 
             OmniControlCmd cmd;
             tracker_.SetActualSpeed(actual_chassis_speed_);  // 底盘实际速度优先于指令速度
+            tracker_.SetGyroZ(chassis_gyro_z_);              // IMU 陀螺仪 Z 轴注入 (PD 控制 D 项)
             bool tracking = tracker_.ComputeControl(current_pose_, cmd);
 
             if (!tracking) {

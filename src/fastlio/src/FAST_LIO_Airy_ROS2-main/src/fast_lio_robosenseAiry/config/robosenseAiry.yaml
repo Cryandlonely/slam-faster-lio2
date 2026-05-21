@@ -1,56 +1,189 @@
 /**:
   ros__parameters:
-    feature_extract_enable: false 
-    point_filter_num: 4
-    max_iteration: 4
-    filter_size_surf: 0.2
-    filter_size_map: 0.2
+
+    # =========================================================
+    # 特征提取开关
+    # false: 直接用所有面点做ICP匹配 (推荐, 精度更高)
+    # true:  先提取边缘/平面特征再匹配 (类似LOAM, 适合结构化室内)
+    # =========================================================
+    feature_extract_enable: false
+
+    # =========================================================
+    # 输入点云降采样步长
+    # 每隔 N 个点取 1 个, 控制进入EKF的点数
+    # 值越大: 单帧点数越少 → 速度快但匹配精度下降
+    # 建议: 高性能电脑=2~4, 工控机=6~8
+    # Airy 96线原始约4万点/帧, 设为6时约6700点进入匹配
+    # =========================================================
+    point_filter_num: 6
+
+    # =========================================================
+    # EKF迭代收敛次数上限
+    # 每帧激光到来后, IEKF最多迭代该次数直到收敛
+    # 值越大: 精度越高但耗时越长
+    # 建议: 高性能电脑=4, 工控机=3 (单帧须在100ms内完成)
+    # =========================================================
+    max_iteration: 3
+
+    # =========================================================
+    # 当前帧点云体素降采样尺寸 (m)
+    # 激光帧在进入特征匹配前先做体素网格降采样
+    # 值越大: 保留点越少 → 速度快但稀疏场景精度下降
+    # 建议: 室内精细建图=0.2, 室外/工控机=0.3~0.5
+    # =========================================================
+    filter_size_surf: 0.3
+
+    # =========================================================
+    # 地图点云体素降采样尺寸 (m)
+    # 新点插入ikd-tree地图前的去重体素栅格大小
+    # 控制地图密度, 与 filter_size_surf 保持一致即可
+    # =========================================================
+    filter_size_map: 0.3
+
+    # =========================================================
+    # 局部地图滑动窗口边长 (m)
+    # ikd-tree只维护以当前位置为中心、边长为该值的立方体内的点
+    # 超出范围的旧点自动删除, 防止内存无限增长
+    # 值越大: 保留更多历史环境 → 内存占用高
+    # 值越小: 回环处可能因地图已删除而匹配失败
+    # 建议: 室内50~100, 室外200
+    # =========================================================
     cube_side_length: 200.0
-    runtime_pos_log_enable: false
-    map_file_path: "" # Overridden by the launch argument in mapping_robosense_airy.launch.py
 
+    # =========================================================
+    # 运行时性能日志
+    # true: 终端实时打印每帧耗时分解 (IMU/匹配/求解/地图更新)
+    #       关注 "ave total" 字段: >100ms 说明计算来不及, 需进一步降参
+    # false: 关闭日志, 减少终端I/O开销 (正式部署时建议关闭)
+    # =========================================================
+    runtime_pos_log_enable: true
+
+    # 地图PCD保存路径, 由 launch 文件的 map_file_path 参数覆盖, 此处留空
+    map_file_path: ""
+
+    # =========================================================
+    # 话题配置
+    # =========================================================
     common:
-      lid_topic: "/rslidar_points"
-      imu_topic: "/rslidar_imu_data" # /mavros/imu/data /ouster/imu /imu/data
-      time_sync_en: false # ONLY turn on when external time synchronization is really not possible
-      time_offset_lidar_to_imu: 0.0 # Time offset between lidar and IMU calibrated by other algorithms, e.g. LI-Init (can be found in README).
-      # This param will take effect no matter what time_sync_en is. So if the time offset is not known exactly, please set as 0.0
+      lid_topic: "/rslidar_points"       # 激光雷达点云话题 (Airy驱动发布)
+      imu_topic: "/rslidar_imu_data"     # IMU话题 (Airy内置IMU, 由驱动发布)
+      # 时间同步: 仅当激光和IMU时间戳无法硬件同步时才开启
+      # 开启后FAST-LIO2自动估计时差; 已硬件同步则必须为false
+      time_sync_en: false
+      # 激光相对IMU的时间偏移(s), 由LI-Init等工具标定
+      # 未标定时保持0.0, 无论time_sync_en是否开启该值都会生效
+      time_offset_lidar_to_imu: 0.0
 
+    # =========================================================
+    # 点云预处理
+    # =========================================================
     preprocess:
-      lidar_type: 5 # 1 for Livox serials LiDAR, 2 for Velodyne LiDAR, 3 for ouster LiDAR, 5 for RoboSense Airy
+      # 雷达类型: 1=Livox, 2=Velodyne, 3=Ouster, 5=RoboSense Airy
+      lidar_type: 5
+      # 激光线数, Airy为96线
       scan_line: 96
-      timestamp_unit: 0 # 0-second, 1-milisecond, 2-microsecond, 3-nanosecond.
-      blind: 0.0
+      # 点云时间戳单位: 0=秒, 1=毫秒, 2=微秒, 3=纳秒
+      # Airy驱动发布的时间戳单位为秒
+      timestamp_unit: 0
+      # 盲区半径(m): 过滤距离雷达原点该距离以内的所有点
+      # 作用: 去除机身自遮挡、近距地面反射等噪声
+      # 设太小(0.0): 机身遮挡点进入匹配, 干扰平面拟合
+      # 设太大(>1.0): 损失近距特征, 狭窄空间精度下降
+      # 建议: 0.3~0.5 (机器人底盘通常在此范围内)
+      blind: 0.5
+      # 雷达旋转频率(Hz), Airy默认10Hz
       scan_rate: 10
 
+    # =========================================================
+    # EKF建图参数
+    # =========================================================
     mapping:
-      max_search_dist_surf: 1.0 # default: 5
-      num_sub_cloud: 1 # This is int, should be fine
-      acc_cov: 0.1
+      # ---- 以下两个参数在当前代码中未被读取, 仅供注释参考 ----
+      # max_search_dist_surf: 1.0  # 最近邻搜索距离阈值(原版默认5m), 当前代码用硬编码值
+      # num_sub_cloud: 1           # 子帧数(将一帧激光分割为N段分别处理), 当前Airy不需要
+
+      # IMU加速度测量噪声协方差 (m/s²)²
+      # 含义: 告诉滤波器IMU加速度测量有多不可信
+      # 值越大: 滤波器越不信任IMU预测, 更依赖激光匹配校正
+      # 值越小: 滤波器更相信IMU, 激光来不及时靠IMU维持精度
+      # Airy内置IMU在振动/机械噪声下偏大, 建议0.3
+      acc_cov: 0.3
+
+      # IMU陀螺仪测量噪声协方差 (rad/s)²
+      # Airy内置陀螺仪质量尚可, 保持默认0.1
       gyr_cov: 0.1
-      b_acc_cov: 0.0001
-      b_gyr_cov: 0.0001
+
+      # 加速度计偏置(bias)的随机游走协方差
+      # 值越大: 允许bias估计值变化更快, 适应温漂/振动引起的bias漂移
+      # 值越小: bias估计更稳定但响应慢
+      # 工控机振动大, 适当放松为0.001
+      b_acc_cov: 0.001
+
+      # 陀螺仪偏置随机游走协方差, 同上
+      b_gyr_cov: 0.001
+
+      # 激光雷达视野角(度), 用于剔除视野外的地图点
+      # Airy水平360°但垂直约±25°, 此处设120°(半角60°)已足够
       fov_degree: 120.0
+
+      # 激光有效探测距离(m), 超过此距离的点不插入地图
+      # Airy最远约150m, 设200m即不作距离过滤
       det_range: 200.0
-      extrinsic_est_en: false # true: enable the online estimation of IMU-LiDAR extrinsic
+
+      # IMU-激光外参在线估计开关
+      # false: 使用下方固定外参(推荐, 已标定好的情况下)
+      # true:  运行时自动优化外参, 会降低初始阶段精度
+      extrinsic_est_en: false
+
+      # IMU相对激光雷达坐标系的平移外参 [x, y, z] (m)
+      # 即IMU原点在激光坐标系中的位置
+      # 需用标定工具(如LI-Init)实测, 当前为Airy出厂近似值
       extrinsic_T: [0.0167, 0.0165, -0.0046]
-      extrinsic_R: [1., 0., 0., 
-                        0., -1., 0., 
-                        0., 0., -1.]
 
+      # IMU相对激光雷达坐标系的旋转外参 (3x3旋转矩阵, 行优先)
+      # [1,0,0, 0,-1,0, 0,0,-1] 表示IMU的Y/Z轴与激光相反
+      # (Airy内置IMU坐标系定义: x前, y右, z下; 激光: x前, y左, z上)
+      extrinsic_R: [1., 0., 0.,
+                    0., -1., 0.,
+                    0., 0., -1.]
+
+    # =========================================================
+    # 话题发布控制
+    # =========================================================
     publish:
+      # 是否发布 /path 历史轨迹话题
       path_en: true
+      # 是否发布有效匹配点可视化 (调试用, 正常使用关闭)
       effect_map_en: false
+      # 是否发布全局地图点云话题 /cloud_map (内存消耗大, 建图时不需要)
       map_en: false
-      scan_publish_en: true # false: close all the point cloud output
-      dense_publish_en: true # false: low down the points number in a global-frame point clouds scan.
-      scan_bodyframe_pub_en: true # true: output the point cloud scans in IMU-body-frame
+      # 是否发布当前帧注册点云 /cloud_registered (RViz可视化需要)
+      scan_publish_en: true
+      # true:  发布全量原始点 (~4万点/帧), 带宽和CPU开销大
+      # false: 发布降采样后的点 (filter_size_surf体素化后), 推荐工控机使用
+      dense_publish_en: false
+      # 是否发布机体坐标系下的点云 /cloud_registered_body
+      # 建图时通常不需要, 关闭节省开销
+      scan_bodyframe_pub_en: false
 
+    # =========================================================
+    # 点云地图保存
+    # =========================================================
     pcd_save:
+      # 是否在收到 /map_save service 后保存完整地图PCD
       pcd_save_en: true
-      interval: -1 # how many LiDAR frames saved in each pcd file;
-      # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
-      realtime_trans_save_en: true         # 是否开启实时PCD传输(覆盖写固定文件 供遥控端读取)
-      realtime_trans_interval_sec: 1.0     # 写入间隔(秒)
-      realtime_trans_rel_path: "PCD/transPCD/trans.pcd"  # 相对于 ROOT_DIR (本文件所在包的源码根目录)
-      realtime_trans_voxel_size: 0.2       # 体素降采样尺寸(m), <=0 不降采样
+      # 自动分帧保存间隔: -1=所有帧合并为单个PCD文件(建议)
+      # 正整数N: 每N帧保存一个独立PCD文件(防内存溢出但产生多文件)
+      interval: -1
+
+      # ---- 实时PCD传输 (供遥控端边建图边查看地图) ----
+      # 是否开启: 每隔interval_sec秒将累积地图降采样后覆盖写到固定文件
+      realtime_trans_save_en: true
+      # 写入间隔(秒), 越小遥控端看到的地图越新鲜但磁盘I/O越频繁
+      realtime_trans_interval_sec: 1.0
+      # 输出文件路径, 相对于包源码根目录(ROOT_DIR)
+      # ROOT_DIR = .../src/fast_lio_robosenseAiry/
+      realtime_trans_rel_path: "PCD/transPCD/trans.pcd"
+      # 写入前的体素降采样尺寸(m), 减小文件体积和传输时间
+      # <=0 不降采样 (文件会随时间增大)
+      realtime_trans_voxel_size: 0.2

@@ -1,4 +1,5 @@
 #include "bridge/bridge_node.h"
+#include "bridge/udp_server.h"
 
 #include <cmath>
 #include <csignal>
@@ -105,19 +106,37 @@ BridgeNode::BridgeNode(const rclcpp::NodeOptions& options)
     nav_cancel_pub_   = this->create_publisher<std_msgs::msg::Bool>("/nav_cancel", 10);
     nav_pause_pub_    = this->create_publisher<std_msgs::msg::Bool>("/nav_pause", 10);
     nav_mode_cmd_pub_ = this->create_publisher<std_msgs::msg::String>("/nav_mode_cmd", 10);
+    cmd_vel_pub_      = this->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
 
-    // ---- 状态推送定时器 ----
+    // ---- UDP 摇杆服务器 ----
+    udp_server_ = std::make_unique<UdpServer>(udp_joystick_port_);
+    udp_server_->setMessageCallback(
+        [this](const std::string& msg, const std::string& ip, uint16_t port) {
+            OnUdpJoystick(msg, ip, port);
+        });
+    if (!udp_server_->start()) {
+        RCLCPP_ERROR(this->get_logger(), "UDP 摇杆服务器启动失败 (port=%d)", udp_joystick_port_);
+        // 不致命, 仅警告
+    } else {
+        RCLCPP_INFO(this->get_logger(), "UDP 摇杆服务器已启动, 端口: %d", udp_joystick_port_);
+    }
+
+    // ---- 摇杆超时看门狗 (50ms检查一次) ----
+    last_joystick_time_ns_ = this->now().nanoseconds();
+    joystick_watchdog_timer_ = this->create_wall_timer(
+        std::chrono::milliseconds(50),
+        std::bind(&BridgeNode::JoystickWatchdogCallback, this));
     auto period = std::chrono::duration<double>(1.0 / status_rate_);
     status_timer_ = this->create_wall_timer(
         std::chrono::duration_cast<std::chrono::nanoseconds>(period),
         std::bind(&BridgeNode::StatusBroadcastCallback, this));
 
     RCLCPP_INFO(this->get_logger(), "BridgeNode 初始化完成");
-    RCLCPP_INFO(this->get_logger(), "  控制端口: %d, PCD端口: %d, 状态推送: %.0f Hz",
-                tcp_port_, pcd_tcp_port_, status_rate_);
+    RCLCPP_INFO(this->get_logger(), "  控制端口: %d, PCD端口: %d, UDP摇杆端口: %d, 状态推送: %.0f Hz",
+                tcp_port_, pcd_tcp_port_, udp_joystick_port_, status_rate_);
     RCLCPP_INFO(this->get_logger(), "  订阅: /nav_status, %s, /chassis/feedback, /chassis/battery",
                 slam_odom_topic_.c_str());
-    RCLCPP_INFO(this->get_logger(), "  发布: goal_pose, /nav_waypoints, /nav_cancel");
+    RCLCPP_INFO(this->get_logger(), "  发布: goal_pose, /nav_waypoints, /nav_cancel, /cmd_vel");
 }
 
 BridgeNode::~BridgeNode() {
@@ -132,6 +151,8 @@ BridgeNode::~BridgeNode() {
 void BridgeNode::DeclareAndLoadParams() {
     this->declare_parameter<int>("tcp_port", 9090);
     this->declare_parameter<int>("pcd_tcp_port", 9091);
+    this->declare_parameter<int>("udp_joystick_port", 9092);
+    this->declare_parameter<double>("joystick_timeout_sec", 0.5);
     this->declare_parameter<double>("status_rate", 5.0);
     this->declare_parameter<std::string>("slam_odom_topic", "/slam/odom");
     this->declare_parameter<std::string>("trans_pcd_rel_path", "src/location/PCD/transPCD/trans.pcd");
@@ -146,6 +167,8 @@ void BridgeNode::DeclareAndLoadParams() {
 
     tcp_port_        = static_cast<uint16_t>(this->get_parameter("tcp_port").as_int());
     pcd_tcp_port_    = static_cast<uint16_t>(this->get_parameter("pcd_tcp_port").as_int());
+    udp_joystick_port_ = static_cast<uint16_t>(this->get_parameter("udp_joystick_port").as_int());
+    joystick_timeout_sec_ = this->get_parameter("joystick_timeout_sec").as_double();
     status_rate_     = this->get_parameter("status_rate").as_double();
     slam_odom_topic_ = this->get_parameter("slam_odom_topic").as_string();
     trans_pcd_rel_path_ = this->get_parameter("trans_pcd_rel_path").as_string();
@@ -230,6 +253,7 @@ void BridgeNode::OnTcpMessage(int client_fd, const std::string& msg) {
                 RCLCPP_INFO(this->get_logger(), "[收到] nav_goal local x=%.3f y=%.3f yaw=%.2f° → ack:nav_goal",
                             pose_msg.pose.position.x, pose_msg.pose.position.y, yaw * 180.0 / M_PI);
             }
+            joystick_active_ = false;  // 导航指令接管, 摇杆看门狗静默
             tcp_server_->sendTo(client_fd, R"({"ack":"nav_goal"})");
 
         } else if (cmd == "nav_waypoints") {
@@ -243,6 +267,7 @@ void BridgeNode::OnTcpMessage(int client_fd, const std::string& msg) {
 
             RCLCPP_INFO(this->get_logger(), "[收到] nav_waypoints (%zu 个航点) → ack:nav_waypoints",
                         j.contains("waypoints") ? j["waypoints"].size() : 0);
+            joystick_active_ = false;  // 导航指令接管, 摇杆看门狗静默
             tcp_server_->sendTo(client_fd, R"({"ack":"nav_waypoints"})");
 
         } else if (cmd == "nav_cancel") {
@@ -613,6 +638,61 @@ void BridgeNode::HandleLifecycleCmd(int client_fd, const std::string& subcmd) {
         RCLCPP_INFO(this->get_logger(), "[回复] ack:stop_outdoor (仅切换定位源至室内SLAM)");
         tcp_server_->sendTo(client_fd, R"({"ack":"stop_outdoor"})");
         PublishNavModeSwitch(indoor_mapping_odom_topic_, false);
+    }
+}
+
+// ==================== UDP 摇杆控制 ====================
+
+/// UDP 协议 (JSON):
+///   {"vx": 0.5, "vy": 0.0, "wz": 0.3}
+///   vx: 前进速度 (m/s), 正向前, 负向后
+///   vy: 横移速度 (m/s), 正向左, 负向右 (全向底盘有效, 履带车填0)
+///   wz: 旋转角速度 (rad/s), 正逆时针(左转), 负顺时针(右转)
+///
+/// 安全机制: 超过 joystick_timeout_sec_ 未收到包则自动清零速度
+
+void BridgeNode::OnUdpJoystick(const std::string& msg,
+                                 const std::string& /*peer_ip*/,
+                                 uint16_t /*peer_port*/) {
+    try {
+        auto j = nlohmann::json::parse(msg);
+
+        geometry_msgs::msg::Twist twist;
+        twist.linear.x  = j.value("vx", 0.0);
+        twist.linear.y  = j.value("vy", 0.0);
+        twist.angular.z = j.value("wz", 0.0);
+
+        cmd_vel_pub_->publish(twist);
+        last_joystick_time_ns_ = this->now().nanoseconds();
+
+        // 首包: 取消正在进行的自动导航, 摇杆接管控制
+        if (!joystick_active_.exchange(true)) {
+            auto cancel_msg = std_msgs::msg::Bool();
+            cancel_msg.data = true;
+            nav_cancel_pub_->publish(cancel_msg);
+            RCLCPP_INFO(this->get_logger(), "[UDP 摇杆] 接管控制, 已发送 nav_cancel");
+        }
+
+    } catch (const nlohmann::json::exception& e) {
+        RCLCPP_WARN(this->get_logger(), "[UDP 摇杆] JSON 解析失败: %s  原始数据: %s",
+                    e.what(), msg.c_str());
+    }
+}
+
+void BridgeNode::JoystickWatchdogCallback() {
+    // 只有收到过摇杆包后才进入保护逻辑, 避免干扰自动导航
+    if (!joystick_active_.load()) {
+        return;
+    }
+    auto now_ns = this->now().nanoseconds();
+    auto elapsed_sec = static_cast<double>(now_ns - last_joystick_time_ns_.load()) * 1e-9;
+    if (elapsed_sec > joystick_timeout_sec_) {
+        // 超时: 发送全零速度, 确保车辆停止
+        geometry_msgs::msg::Twist stop;
+        cmd_vel_pub_->publish(stop);
+        // 清除活跃标志, 停车后不再持续发零速干扰其他控制源
+        joystick_active_ = false;
+        RCLCPP_INFO(this->get_logger(), "[UDP 摇杆] %.1f s 无包, 已发送停车指令", elapsed_sec);
     }
 }
 

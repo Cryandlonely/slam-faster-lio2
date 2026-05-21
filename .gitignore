@@ -4,3 +4,5 @@
 /log
 /nav_logs
 /.idea
+/__pycache__
+/.pytest_cache

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <participant profile_name="participant_profile_ros2" is_default_profile="true">
+        <rtps>
+            <name>profile_for_ros2_context</name>
+            <sendSocketBufferSize>104857600</sendSocketBufferSize>
+            <listenSocketBufferSize>104857600</listenSocketBufferSize>
+        </rtps>
+    </participant>
+    <data_writer profile_name="default publisher profile" is_default_profile="true">
+        <historyMemoryPolicy>DYNAMIC</historyMemoryPolicy>
+    </data_writer>
+    <data_reader profile_name="default subscription profile" is_default_profile="true">
+        <historyMemoryPolicy>DYNAMIC</historyMemoryPolicy>
+    </data_reader>
+    <data_writer profile_name="/rslidar_points">
+        <qos>
+            <publishMode><kind>ASYNCHRONOUS</kind></publishMode>
+            <data_sharing><kind>AUTOMATIC</kind></data_sharing>
+        </qos>
+        <historyMemoryPolicy>DYNAMIC</historyMemoryPolicy>
+    </data_writer>
+    <data_reader profile_name="/rslidar_points">
+        <qos>
+            <data_sharing><kind>AUTOMATIC</kind></data_sharing>
+        </qos>
+        <historyMemoryPolicy>DYNAMIC</historyMemoryPolicy>
+    </data_reader>
+    <data_writer profile_name="/rslidar_imu_data">
+        <qos>
+            <reliability><kind>RELIABLE</kind></reliability>
+            <durability><kind>VOLATILE</kind></durability>
+            <publishMode><kind>SYNCHRONOUS</kind></publishMode>
+            <data_sharing><kind>AUTOMATIC</kind></data_sharing>
+        </qos>
+        <topic>
+            <historyQos><kind>KEEP_LAST</kind><depth>200</depth></historyQos>
+        </topic>
+        <historyMemoryPolicy>DYNAMIC</historyMemoryPolicy>
+    </data_writer>
+    <data_reader profile_name="/rslidar_imu_data">
+        <qos>
+            <reliability><kind>RELIABLE</kind></reliability>
+            <durability><kind>VOLATILE</kind></durability>
+            <data_sharing><kind>AUTOMATIC</kind></data_sharing>
+        </qos>
+        <topic>
+            <historyQos><kind>KEEP_LAST</kind><depth>200</depth></historyQos>
+        </topic>
+        <historyMemoryPolicy>DYNAMIC</historyMemoryPolicy>
+    </data_reader>
+</profiles>

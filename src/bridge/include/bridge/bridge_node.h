@@ -2,6 +2,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/bool.hpp>
@@ -9,7 +10,9 @@
 #include <sensor_msgs/msg/imu.hpp>
 
 #include "bridge/tcp_server.h"
+#include "bridge/udp_server.h"
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -53,6 +56,13 @@ private:
     void OnPcdTcpMessage(int client_fd, const std::string& msg);
     void OnPcdTcpConnect(int client_fd, bool connected);
 
+    // UDP 摇杆消息处理
+    void OnUdpJoystick(const std::string& msg,
+                       const std::string& peer_ip,
+                       uint16_t peer_port);
+    // 摇杆超时清零定时器回调
+    void JoystickWatchdogCallback();
+
     // 节点生命周期管理
     void HandleLifecycleCmd(int client_fd, const std::string& subcmd);
     void StartManagedProcess(const std::string& name, const std::string& bash_cmd);
@@ -76,6 +86,12 @@ private:
     std::unique_ptr<TcpServer> tcp_server_;
     std::unique_ptr<TcpServer> pcd_server_;
 
+    // UDP 摇杆服务器
+    std::unique_ptr<UdpServer> udp_server_;
+    rclcpp::TimerBase::SharedPtr joystick_watchdog_timer_;  // 超时清零看门狗
+    std::atomic<int64_t> last_joystick_time_ns_{0};  // 上次收到摇杆包的时间(ns), 原子类型避免跨线程竞争
+    std::atomic<bool>    joystick_active_{false};     // 是否处于摇杆活跃模式, 未收到过包时不干扰自动导航
+
     // ---- ROS2 订阅 (聚合状态源) ----
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr nav_status_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr slam_odom_sub_;
@@ -88,13 +104,15 @@ private:
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr nav_cancel_pub_;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr nav_pause_pub_;   // true=暂停, false=继续
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr nav_mode_cmd_pub_;  // 发给 slam_nav_node 切换定位源
-
+    rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;   // 摇杆直接速度指令
     // 定时器
     rclcpp::TimerBase::SharedPtr status_timer_;
 
     // ---- 参数 ----
     uint16_t tcp_port_       = 9090;
     uint16_t pcd_tcp_port_   = 9091;
+    uint16_t udp_joystick_port_ = 9092;  // 摇杆UDP端口
+    double   joystick_timeout_sec_ = 0.5;  // 超过此时间未收到摇杆包则清零速度
     double   status_rate_    = 5.0;    // Hz
     std::string slam_odom_topic_ = "/slam/odom";
     std::string trans_pcd_rel_path_ = "src/location/PCD/transPCD/trans.pcd";

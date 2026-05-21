@@ -21,6 +21,7 @@
 #include <tf2_ros/transform_broadcaster.h>
 #include <visualization_msgs/msg/marker.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 
 #include "nav_planner/common/types.h"
 #include "nav_planner/planning/point_to_point_planner.h"
@@ -58,6 +59,7 @@ private:
     void NavCancelCallback(const std_msgs::msg::Bool::SharedPtr msg);
     void NavPauseCallback(const std_msgs::msg::Bool::SharedPtr msg);
     void ChassisFeedbackCallback(const std_msgs::msg::String::SharedPtr msg);  // 底盘反馈实际速度
+    void ImuCallback(const sensor_msgs::msg::Imu::SharedPtr msg);              // 底盘 IMU 陀螺仪 (D 项阻尼)
     void PointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);  // 前方过滤盒避障
 
     // ---- 多航点队列管理 ----
@@ -100,6 +102,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr   nav_cancel_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr   nav_pause_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr chassis_feedback_sub_;  // 底盘反馈
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;               // 底盘 IMU
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;  // 前方避障点云 (Airy PointCloud2)
 
     // 发布
@@ -144,6 +147,7 @@ private:
     bool nav_paused_ = false;
 
     double actual_chassis_speed_ = -1.0;  // 底盘反馈实际线速 (m/s); 调用 SetActualSpeed 传入 tracker
+    double chassis_gyro_z_       = 0.0;   // 底盘 IMU 陀螺仪 Z 轴 (rad/s); 由 ImuCallback 更新
 
     // ==================== 避障状态 (前方过滤盒) ====================
     // 车体系障碍质心 (livox 雷达坐标系: x前 y左 z上, 与 body 几乎重合)

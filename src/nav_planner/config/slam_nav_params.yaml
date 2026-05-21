@@ -36,6 +36,7 @@ slam_nav_node:
       max_linear_y: 0.0               # 最大侧移速度 (m/s), 履带车无横向移动
       max_angular_velocity: 1.0      # 最大角速度 (rad/s)
       heading_kp: 0.8                 # 航向 P 控制增益, 降低防止漂移引起来回摆动
+      heading_kd: 0.3                 # 航向 D 控制增益, IMU 陀螺仪阻尼抑制过冲 (0=关闭, 建议 0.2-0.5)
       cte_kp: 0.8                    # 横向跟踪误差增益, 漂移噪声强, 不宜过大
       cte_dead_zone: 0.15             # CTE 死区 (m); 实测95%误差×1.5=0.64m
       cmd_filter_alpha: 0.25          # 低通滤波系数, 漂移为低频应尽量平滑输出

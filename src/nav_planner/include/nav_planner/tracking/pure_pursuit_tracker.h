@@ -26,6 +26,7 @@ struct TrackerParams {
     double cte_dead_zone        = 0.3;   // CTE 死区 (m); 应 ≥ 定位精度, GPS 建议 0.3m
     double cmd_filter_alpha     = 0.3;   // 低通滤波系数
     double heading_align_threshold = 0.785;  // 航向对齐阈值 (rad, ~45°), yaml 以度输入由节点换算
+    double heading_kd           = 0.3;   // 航向 D 项增益 (IMU 陀螺仪反馈阻尼, 抑制过冲)
 };
 
 /// Pure Pursuit 轨迹跟踪器 (万向轮底盘适配)
@@ -40,6 +41,7 @@ public:
     void SetParams(const TrackerParams& params);
     void SetPath(const std::vector<Waypoint>& path, bool is_final = true);
     void SetActualSpeed(double speed);  // 注入底盘反馈的实际速度, 用于更精确的动态前视距离
+    void SetGyroZ(double gz);           // 注入 IMU 陀螺仪 Z 轴角速度 (rad/s), 用于 D 项阻尼
     bool ComputeControl(const Pose2D& current, OmniControlCmd& cmd);
     bool IsGoalReached() const;
     TrackingDebugInfo GetDebugInfo() const;
@@ -61,6 +63,7 @@ private:
     double prev_yaw_rate_ = 0.0;
     double prev_speed_ = 0.0;
     double actual_speed_ = -1.0;  // 底盘反馈实际速度; <0 表示未收到, 回退到 prev_speed_
+    double current_gyro_z_ = 0.0;  // IMU 陀螺仪 Z 轴角速度 (rad/s), 由外部注入
 };
 
 }  // namespace slam_nav
