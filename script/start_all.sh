@@ -147,6 +147,13 @@ launch_module "nav_planner" "ros2 launch nav_planner slam_nav_debug.launch.py" 2
 
 # ---- 5. TCP 桥接 ----
 echo -e "${YELLOW}[5/5] TCP 桥接${NC}"
+# 释放 9090 端口（如有占用则强制终止）
+_9090_pids=$(lsof -ti tcp:9090 2>/dev/null || true)
+if [[ -n "$_9090_pids" ]]; then
+    echo -e "  ${YELLOW}检测到 9090 端口占用，正在释放...${NC}"
+    echo "$_9090_pids" | xargs kill -9 2>/dev/null || true
+    sleep 1
+fi
 launch_module "bridge" "ros2 launch bridge bridge_launch.py" 1
 
 echo ""
