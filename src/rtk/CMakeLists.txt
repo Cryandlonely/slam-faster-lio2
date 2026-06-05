@@ -25,14 +25,14 @@ include_directories(include)
 add_executable(rtk_node src/main.cpp)
 
 # 链接依赖
-ament_target_dependencies(rtk_node
-  rclcpp
-  sensor_msgs
-  std_msgs
-  geometry_msgs
-  nav_msgs
+target_link_libraries(rtk_node
+  ${rclcpp_TARGETS}
+  ${sensor_msgs_TARGETS}
+  ${std_msgs_TARGETS}
+  ${geometry_msgs_TARGETS}
+  ${nav_msgs_TARGETS}
+  nlohmann_json::nlohmann_json
 )
-target_link_libraries(rtk_node nlohmann_json::nlohmann_json)
 
 # 安装可执行文件
 install(TARGETS

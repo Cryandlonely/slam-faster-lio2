@@ -15,11 +15,11 @@ find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 
 add_executable(vru_node src/vru_node.cpp)
-ament_target_dependencies(vru_node
-  rclcpp
-  std_msgs
-  geometry_msgs
-  sensor_msgs
+target_link_libraries(vru_node
+  ${rclcpp_TARGETS}
+  ${std_msgs_TARGETS}
+  ${geometry_msgs_TARGETS}
+  ${sensor_msgs_TARGETS}
 )
 
 install(TARGETS vru_node

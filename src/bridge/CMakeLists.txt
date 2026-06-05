@@ -36,13 +36,14 @@ add_executable(bridge_node
   src/main.cpp
   src/bridge_node.cpp
 )
-target_link_libraries(bridge_node bridge_tcp nlohmann_json::nlohmann_json)
-ament_target_dependencies(bridge_node
-  rclcpp
-  geometry_msgs
-  nav_msgs
-  std_msgs
-  sensor_msgs
+target_link_libraries(bridge_node
+  bridge_tcp
+  nlohmann_json::nlohmann_json
+  ${rclcpp_TARGETS}
+  ${geometry_msgs_TARGETS}
+  ${nav_msgs_TARGETS}
+  ${std_msgs_TARGETS}
+  ${sensor_msgs_TARGETS}
 )
 
 # ---- 安装 ----

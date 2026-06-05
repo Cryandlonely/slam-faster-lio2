@@ -115,7 +115,20 @@ else()
   target_link_libraries(fastlio_mapping ${cpp_typesupport_target})
 endif()
 
-ament_target_dependencies(fastlio_mapping ${dependencies})
+target_link_libraries(fastlio_mapping
+  ${rclcpp_TARGETS}
+  ${rclcpp_components_TARGETS}
+  ${geometry_msgs_TARGETS}
+  ${nav_msgs_TARGETS}
+  ${sensor_msgs_TARGETS}
+  ${std_msgs_TARGETS}
+  ${std_srvs_TARGETS}
+  ${visualization_msgs_TARGETS}
+  ${tf2_ros_TARGETS}
+  ${tf2_eigen_TARGETS}
+  ${pcl_conversions_TARGETS}
+  ${livox_ros_driver2_TARGETS}
+)
 
 # ---------------- Install --------------- #
 install(TARGETS fastlio_mapping

@@ -33,12 +33,12 @@ add_executable(chassis_node
   src/main.cpp
   src/chassis_node.cpp
 )
-target_link_libraries(chassis_node chassis_serial)
-ament_target_dependencies(chassis_node
-  rclcpp
-  geometry_msgs
-  std_msgs
-  sensor_msgs
+target_link_libraries(chassis_node
+  chassis_serial
+  ${rclcpp_TARGETS}
+  ${geometry_msgs_TARGETS}
+  ${std_msgs_TARGETS}
+  ${sensor_msgs_TARGETS}
 )
 
 # ---- 安装 ----
