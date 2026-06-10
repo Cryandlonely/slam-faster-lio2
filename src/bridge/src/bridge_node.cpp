@@ -104,7 +104,6 @@ BridgeNode::BridgeNode(const rclcpp::NodeOptions& options)
     nav_waypoints_pub_ = this->create_publisher<std_msgs::msg::String>("/nav_waypoints", 10);
     nav_cancel_pub_   = this->create_publisher<std_msgs::msg::Bool>("/nav_cancel", 10);
     nav_pause_pub_    = this->create_publisher<std_msgs::msg::Bool>("/nav_pause", 10);
-    nav_mode_cmd_pub_ = this->create_publisher<std_msgs::msg::String>("/nav_mode_cmd", 10);
 
     // ---- 状态推送定时器 ----
     auto period = std::chrono::duration<double>(1.0 / status_rate_);
@@ -143,7 +142,6 @@ void BridgeNode::DeclareAndLoadParams() {
     this->declare_parameter<std::string>("localization_config_file", "mid360.yaml");
     this->declare_parameter<std::string>("indoor_mapping_odom_topic", "/Odometry");
     this->declare_parameter<std::string>("indoor_loc_odom_topic", "/localization");
-    this->declare_parameter<std::string>("outdoor_odom_topic", "/outdoor/odom");
 
     tcp_port_        = static_cast<uint16_t>(this->get_parameter("tcp_port").as_int());
     pcd_tcp_port_    = static_cast<uint16_t>(this->get_parameter("pcd_tcp_port").as_int());
@@ -160,7 +158,6 @@ void BridgeNode::DeclareAndLoadParams() {
     localization_config_file_ = this->get_parameter("localization_config_file").as_string();
     indoor_mapping_odom_topic_   = this->get_parameter("indoor_mapping_odom_topic").as_string();
     indoor_loc_odom_topic_       = this->get_parameter("indoor_loc_odom_topic").as_string();
-    outdoor_odom_topic_          = this->get_parameter("outdoor_odom_topic").as_string();
 }
 
 // ==================== TCP 消息处理 ====================
@@ -178,60 +175,27 @@ void BridgeNode::OnTcpMessage(int client_fd, const std::string& msg) {
         std::string cmd = j["cmd"].get<std::string>();
 
         if (cmd == "nav_goal") {
-            // 单点导航: 支持 local(x,y) 或 gps(lat,lon)
-            std::string coord_mode = j.value("coord_mode", std::string("local"));
-            if (j.contains("input_mode") && j["input_mode"].is_string() && !j.contains("coord_mode")) {
-                std::string input_mode = j["input_mode"].get<std::string>();
-                coord_mode = (input_mode == "outdoor") ? "gps" : "local";
+            // 单点导航: map 坐标系 (x, y)
+            if (!j.contains("x") || !j.contains("y")) {
+                tcp_server_->sendTo(client_fd, R"({"error":"nav_goal requires x,y"})");
+                return;
             }
 
-            if (coord_mode == "gps") {
-                if (!j.contains("lat") || !j.contains("lon")) {
-                    tcp_server_->sendTo(client_fd, R"({"error":"nav_goal gps mode requires lat,lon"})");
-                    return;
-                }
-                nlohmann::json fwd;
-                fwd["coord_mode"] = "gps";
-                nlohmann::json wp;
-                wp["lat"] = j["lat"];
-                wp["lon"] = j["lon"];
-                if (j.contains("yaw")) {
-                    wp["yaw"] = j["yaw"];
-                }
-                if (j.contains("heading_deg")) {
-                    wp["heading_deg"] = j["heading_deg"];
-                }
-                if (j.contains("target_vel")) {
-                    fwd["target_vel"] = j["target_vel"];
-                }
-                fwd["waypoints"] = nlohmann::json::array({wp});
-                auto wp_msg = std_msgs::msg::String();
-                wp_msg.data = fwd.dump();
-                nav_waypoints_pub_->publish(wp_msg);
-                RCLCPP_INFO(this->get_logger(), "[收到] nav_goal GPS lat=%.8f lon=%.8f → ack:nav_goal",
-                            j["lat"].get<double>(), j["lon"].get<double>());
-            } else {
-                if (!j.contains("x") || !j.contains("y")) {
-                    tcp_server_->sendTo(client_fd, R"({"error":"nav_goal local mode requires x,y"})");
-                    return;
-                }
+            auto pose_msg = geometry_msgs::msg::PoseStamped();
+            pose_msg.header.stamp = this->now();
+            pose_msg.header.frame_id = "map";
+            pose_msg.pose.position.x = j["x"].get<double>();
+            pose_msg.pose.position.y = j["y"].get<double>();
+            pose_msg.pose.position.z = 0.0;
 
-                auto pose_msg = geometry_msgs::msg::PoseStamped();
-                pose_msg.header.stamp = this->now();
-                pose_msg.header.frame_id = "map";
-                pose_msg.pose.position.x = j["x"].get<double>();
-                pose_msg.pose.position.y = j["y"].get<double>();
-                pose_msg.pose.position.z = 0.0;
+            double yaw = j.value("yaw", 0.0);
+            pose_msg.pose.orientation.w = std::cos(yaw / 2.0);
+            pose_msg.pose.orientation.z = std::sin(yaw / 2.0);
 
-                double yaw = j.value("yaw", 0.0);
-                pose_msg.pose.orientation.w = std::cos(yaw / 2.0);
-                pose_msg.pose.orientation.z = std::sin(yaw / 2.0);
+            goal_pose_pub_->publish(pose_msg);
 
-                goal_pose_pub_->publish(pose_msg);
-
-                RCLCPP_INFO(this->get_logger(), "[收到] nav_goal local x=%.3f y=%.3f yaw=%.2f° → ack:nav_goal",
-                            pose_msg.pose.position.x, pose_msg.pose.position.y, yaw * 180.0 / M_PI);
-            }
+            RCLCPP_INFO(this->get_logger(), "[收到] nav_goal x=%.3f y=%.3f yaw=%.2f° → ack:nav_goal",
+                        pose_msg.pose.position.x, pose_msg.pose.position.y, yaw * 180.0 / M_PI);
             tcp_server_->sendTo(client_fd, R"({"ack":"nav_goal"})");
 
         } else if (cmd == "nav_waypoints") {
@@ -276,13 +240,12 @@ void BridgeNode::OnTcpMessage(int client_fd, const std::string& msg) {
             tcp_server_->sendTo(client_fd, status);
 
         } else if (cmd == "start_mapping" || cmd == "stop_mapping" ||
-                   cmd == "start_indoor_loc" || cmd == "stop_indoor_loc" ||
-                   cmd == "start_outdoor" || cmd == "stop_outdoor") {
+                   cmd == "start_indoor_loc" || cmd == "stop_indoor_loc") {
             HandleLifecycleCmd(client_fd, cmd);
 
         } else {
             tcp_server_->sendTo(client_fd,
-                R"({"error":"unknown cmd","supported":["nav_goal","nav_waypoints","nav_cancel","nav_pause","nav_resume","query_status","start_mapping","stop_mapping","start_indoor_loc","stop_indoor_loc","start_outdoor","stop_outdoor"]})");
+                R"({"error":"unknown cmd","supported":["nav_goal","nav_waypoints","nav_cancel","nav_pause","nav_resume","query_status","start_mapping","stop_mapping","start_indoor_loc","stop_indoor_loc"]})");
         }
 
     } catch (const nlohmann::json::exception& e) {
@@ -553,18 +516,6 @@ void BridgeNode::StopManagedProcess(const std::string& name) {
     RCLCPP_INFO(this->get_logger(), "[Lifecycle] 已停止进程 '%s' (pid=%d)", name.c_str(), pid);
 }
 
-void BridgeNode::PublishNavModeSwitch(const std::string& odom_topic, bool gps_mode) {
-    nlohmann::json j;
-    j["action"]     = "switch_odom";
-    j["topic"]      = odom_topic;
-    j["gps"]        = gps_mode;
-    auto msg = std_msgs::msg::String();
-    msg.data = j.dump();
-    nav_mode_cmd_pub_->publish(msg);
-    RCLCPP_INFO(this->get_logger(), "[Lifecycle] 发布定位源切换: topic=%s gps=%d",
-                odom_topic.c_str(), gps_mode);
-}
-
 void BridgeNode::HandleLifecycleCmd(int client_fd, const std::string& subcmd) {
     RCLCPP_INFO(this->get_logger(), "[收到] %s", subcmd.c_str());
     // 构造 ros2 launch/run 命令（继承当前进程的 ROS 环境，无需再 source）
@@ -583,8 +534,6 @@ void BridgeNode::HandleLifecycleCmd(int client_fd, const std::string& subcmd) {
     if (subcmd == "start_mapping") {
         auto cmd = make_launch("location", "mapping.launch.py", mapping_config_file_);
         StartManagedProcess("mapping", cmd);
-        // nav_planner 直接用 /Odometry（建图模式）
-        PublishNavModeSwitch(indoor_mapping_odom_topic_, false);
         RCLCPP_INFO(this->get_logger(), "[回复] ack:start_mapping");
         tcp_server_->sendTo(client_fd, R"({"ack":"start_mapping"})");
 
@@ -609,9 +558,6 @@ void BridgeNode::HandleLifecycleCmd(int client_fd, const std::string& subcmd) {
         auto cmd = make_launch("location", "velodyne_localization.launch.py",
                                localization_config_file_);
         StartManagedProcess("indoor_loc", cmd);
-        // 等 transform_fusion 起来后切换到 /localization
-        // 稍作延迟（由上层逻辑决定），这里先切 odom topic
-        PublishNavModeSwitch(indoor_loc_odom_topic_, false);
         RCLCPP_INFO(this->get_logger(), "[回复] ack:start_indoor_loc");
         tcp_server_->sendTo(client_fd, R"({"ack":"start_indoor_loc"})");
 
@@ -620,37 +566,6 @@ void BridgeNode::HandleLifecycleCmd(int client_fd, const std::string& subcmd) {
         RCLCPP_INFO(this->get_logger(), "[回复] ack:stop_indoor_loc");
         tcp_server_->sendTo(client_fd, R"({"ack":"stop_indoor_loc"})");
 
-    } else if (subcmd == "start_outdoor") {
-        // 先立即回复 ack, 避免 TCP 线程在 StopManagedProcess 阻塞期间超时
-        RCLCPP_INFO(this->get_logger(), "[回复] ack:start_outdoor (异步启动RTK中)");
-        tcp_server_->sendTo(client_fd, R"({"ack":"start_outdoor"})");
-        auto rtk_cmd = make_launch("rtk", "rtk_launch.py", "");
-        std::thread([this, rtk_cmd]() {
-            // 先停旧进程 (可能阻塞数秒, 异步执行)
-            StopManagedProcess("indoor_loc");
-            StopManagedProcess("mapping");
-            // 启动 RTK
-            StartManagedProcess("rtk", rtk_cmd);
-            // 通知 nav_planner 切换定位源
-            PublishNavModeSwitch(outdoor_odom_topic_, true);
-        }).detach();
-
-    } else if (subcmd == "stop_outdoor") {
-        // 先立即回复 ack
-        RCLCPP_INFO(this->get_logger(), "[回复] ack:stop_outdoor (异步停止RTK中)");
-        tcp_server_->sendTo(client_fd, R"({"ack":"stop_outdoor"})");
-        std::thread([this]() {
-            StopManagedProcess("rtk");
-            // 切回室内定位 odom
-            bool indoor_loc_running = false;
-            {
-                std::lock_guard<std::mutex> lock(proc_mutex_);
-                indoor_loc_running = managed_pids_.count("indoor_loc") > 0;
-            }
-            const std::string& indoor_topic = indoor_loc_running
-                ? indoor_loc_odom_topic_ : indoor_mapping_odom_topic_;
-            PublishNavModeSwitch(indoor_topic, false);
-        }).detach();
     }
 }
 

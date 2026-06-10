@@ -8,60 +8,55 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# --------------------------
+# zsibot SDK (静态库 + 头文件)
+# --------------------------
+set(ZSIBOT_LIB "/usr/local/lib/libzsibot.a")
+set(ZSIBOT_INCLUDE "/usr/local/include/zsibot/include")
+
+if(NOT EXISTS ${ZSIBOT_LIB})
+    message(FATAL_ERROR "未找到 zsibot 库文件: ${ZSIBOT_LIB}")
+endif()
+
+message(STATUS "使用 zsibot SDK: ${ZSIBOT_LIB}")
+
 # ---- 依赖 ----
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
-find_package(sensor_msgs REQUIRED)
-
-# ---- 头文件 ----
-include_directories(include)
-
-# ---- 串口底层库 ----
-add_library(chassis_serial SHARED
-  src/chassis_serial.cpp
-)
-target_include_directories(chassis_serial PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-)
-target_link_libraries(chassis_serial pthread)
+find_package(std_srvs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 
 # ---- ROS2 节点 ----
-add_executable(chassis_node
-  src/main.cpp
-  src/chassis_node.cpp
+add_executable(chassis_driver_node src/chassis_driver_node.cpp)
+target_include_directories(chassis_driver_node PRIVATE
+    ${ZSIBOT_INCLUDE}
 )
-target_link_libraries(chassis_node chassis_serial)
-ament_target_dependencies(chassis_node
-  rclcpp
-  geometry_msgs
-  std_msgs
-  sensor_msgs
+target_link_libraries(chassis_driver_node
+  ${ZSIBOT_LIB}
+  ${rclcpp_TARGETS}
+  ${std_msgs_TARGETS}
+  ${std_srvs_TARGETS}
+  ${geometry_msgs_TARGETS}
+  ${nav_msgs_TARGETS}
 )
 
 # ---- 安装 ----
-install(TARGETS chassis_serial
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib
-  RUNTIME DESTINATION bin
-)
-
-install(TARGETS chassis_node
+install(TARGETS chassis_driver_node
   DESTINATION lib/${PROJECT_NAME}
-)
-
-install(DIRECTORY include/
-  DESTINATION include
-)
-
-install(DIRECTORY config/
-  DESTINATION share/${PROJECT_NAME}/config
 )
 
 install(DIRECTORY launch/
   DESTINATION share/${PROJECT_NAME}/launch
+  OPTIONAL
 )
+
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  set(ament_cmake_copyright_FOUND TRUE)
+  set(ament_cmake_cpplint_FOUND TRUE)
+  ament_lint_auto_find_test_dependencies()
+endif()
 
 ament_package()

@@ -53,18 +53,10 @@ public:
 private:
     // ---- 参数声明与加载 ----
     void DeclareAndLoadParams();
-    bool ConvertOutdoorGpsToLocal(double lat, double lon, double& x, double& y) const;
 
     // ---- 回调函数 ----
     /// 统一定位里程计回调
     void LocalizationOdomCallback(const nav_msgs::msg::Odometry::SharedPtr msg);
-
-    /// 运行时定位源切换命令回调 (来自 bridge 的 /nav_mode_cmd)
-    /// JSON 格式: {"action":"switch_odom","topic":"/localization","gps":false}
-    void NavModeCmdCallback(const std_msgs::msg::String::SharedPtr msg);
-
-    /// 运行时切换定位订阅话题（重新创建 subscription）
-    void SwitchLocalizationSource(const std::string& topic, bool gps_mode);
 
     /// RViz2 目标点回调 (map 坐标系)
     void GoalPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
@@ -85,15 +77,6 @@ private:
     /// Livox 点云回调——识别动态障碍并写入代价地图
     void LivoxCallback(
         const livox_ros_driver2::msg::CustomMsg::SharedPtr msg);
-
-    /// GPS 模式下使用原始世界坐标点列检查路径廊道
-    bool IsRawPathBlocked(const std::vector<Waypoint>& path,
-                          const Pose2D& robot,
-                          double lookahead_dist) const;
-
-    /// GPS 模式: 计算绕行绕路点 (评估左右两侧障碍数量, 取较少一侧)
-    Pose2D ComputeGpsDetourWaypoint(const std::vector<Waypoint>& path,
-                                   const Pose2D& robot) const;
 
     // ---- 多航点队列管理 ----
     void CancelMultiNav();
@@ -133,7 +116,6 @@ private:
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr nav_waypoints_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr   nav_cancel_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr   nav_pause_sub_;
-    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr nav_mode_cmd_sub_;  // 运行时定位源切换
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
         initial_pose_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
@@ -199,13 +181,8 @@ private:
     double control_rate_ = 20.0;       // 控制循环频率 (Hz)
     double status_rate_  = 2.0;        // 状态发布频率 (Hz)
     bool   use_tf_pose_  = false;      // 是否从 TF 获取位姿 (而非 odom 话题)
-    std::string nav_mode_ = "slam";   // slam / gps
-    bool   gps_mode_ = false;          // 是否室外 GPS 模式
     std::string slam_odom_topic_ = "/slam/odom";   // SLAM 里程计话题名
-    std::string outdoor_odom_topic_ = "/outdoor/odom";  // 室外统一位姿话题
     std::string localization_odom_topic_ = "/slam/odom";  // 当前生效的定位话题
-    double outdoor_ref_latitude_ = 36.66111;
-    double outdoor_ref_longitude_ = 117.01665;
     std::string map_frame_  = "map";                // 地图坐标系
     std::string base_frame_ = "base_link";           // 机器人坐标系
     std::string map_topic_  = "map";                   // OccupancyGrid 话题
@@ -217,10 +194,6 @@ private:
     double obstacle_z_min_    = 0.15;    // 点云高度下限(雷达坐标系), m
     double obstacle_z_max_    = 2.0;     // 点云高度上限, m
     double obstacle_fov_half_deg_ = 90.0; // 前向半角 FOV (度), 90=前半球
-    double obstacle_corridor_width_ = 0.6; // 路径廈道半宽 (m), GPS模式障碍检测用
-    bool   gps_avoidance_        = false; // GPS模式: true=计算绕路点绕行, false=停车等待
-    double detour_lateral_       = 1.5;   // 绕路点横向偏移 (m)
-    double detour_forward_       = 1.5;   // 绕路点向前偏移 (m)
     double dynamic_ttl_       = 3.0;     // 动态障碍 TTL (s)
     double replan_lookahead_  = 3.0;     // 检测预视距离 (m)
     double replan_cooldown_   = 2.0;     // 重规划冷却时间 (s)

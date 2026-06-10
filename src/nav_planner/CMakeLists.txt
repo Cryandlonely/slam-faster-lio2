@@ -35,9 +35,9 @@ target_include_directories(slam_nav_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-ament_target_dependencies(slam_nav_core
-  rclcpp
-  nav_msgs
+target_link_libraries(slam_nav_core
+  ${rclcpp_TARGETS}
+  ${nav_msgs_TARGETS}
 )
 
 # ---- 可执行文件 ----
@@ -45,16 +45,17 @@ add_executable(slam_nav_node
   src/main.cpp
   src/slam_nav_node.cpp
 )
-target_link_libraries(slam_nav_node slam_nav_core nlohmann_json::nlohmann_json)
-ament_target_dependencies(slam_nav_node
-  rclcpp
-  nav_msgs
-  geometry_msgs
-  std_msgs
-  tf2_ros
-  tf2_geometry_msgs
-  visualization_msgs
-  livox_ros_driver2
+target_link_libraries(slam_nav_node
+  slam_nav_core
+  nlohmann_json::nlohmann_json
+  ${rclcpp_TARGETS}
+  ${nav_msgs_TARGETS}
+  ${geometry_msgs_TARGETS}
+  ${std_msgs_TARGETS}
+  ${tf2_ros_TARGETS}
+  ${tf2_geometry_msgs_TARGETS}
+  ${visualization_msgs_TARGETS}
+  ${livox_ros_driver2_TARGETS}
 )
 
 # ---- 安装 ----

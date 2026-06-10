@@ -35,5 +35,3 @@ bridge_node:
     # 室内定位模式的定位话题 (transform_fusion 输出, 跨会话全局位姿)
     indoor_loc_odom_topic: "/localization"
 
-    # 室外 RTK 定位话题
-    outdoor_odom_topic: "/outdoor/odom"
